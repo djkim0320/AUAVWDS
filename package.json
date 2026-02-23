@@ -1,0 +1,43 @@
+{
+  "name": "auavwds",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:renderer": "vite",
+    "dev:electron": "wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
+    "build": "vite build",
+    "backend:dev": "python backend/main.py",
+    "backend:build": "powershell -ExecutionPolicy Bypass -File ./scripts/build_backend.ps1",
+    "guard:package": "node ./scripts/ensure-no-web-bridge.cjs",
+    "pack:unpacked": "npm run backend:build && cross-env VITE_ENABLE_WEB_BRIDGE=0 npm run build && electron-builder --config electron-builder.yml --win --dir",
+    "release:unpacked": "npm run pack:unpacked",
+    "release:all": "npm run backend:build && cross-env VITE_ENABLE_WEB_BRIDGE=0 npm run build && electron-builder --config electron-builder.yml --win",
+    "dist": "npm run pack:unpacked",
+    "dist:setup": "npm run backend:build && cross-env VITE_ENABLE_WEB_BRIDGE=0 npm run build && electron-builder --config electron-builder.yml --win nsis"
+  },
+  "dependencies": {
+    "echarts": "^5.5.1",
+    "echarts-for-react": "^3.0.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "three": "^0.169.0"
+  },
+  "devDependencies": {
+    "@electron/fuses": "^2.0.0",
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/three": "^0.169.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^32.3.3",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.0",
+    "wait-on": "^8.0.1"
+  }
+}

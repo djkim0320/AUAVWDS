@@ -1,0 +1,18 @@
+﻿void main()
+{
+    string wid = AddGeom( "WING", "" );
+    SetParmVal( wid, "Span", "XSec_1", 1.0 );
+    SetParmVal( wid, "Root_Chord", "XSec_1", 0.2 );
+    SetParmVal( wid, "Tip_Chord", "XSec_1", 0.12 );
+    SetParmVal( wid, "Sweep", "XSec_1", 8.0 );
+    Update();
+    string compgeom_name = "VSPAEROComputeGeometry";
+    SetAnalysisInputDefaults( compgeom_name );
+    array< int > thick_set = GetIntAnalysisInput( compgeom_name, "GeomSet" );
+    array< int > thin_set = GetIntAnalysisInput( compgeom_name, "ThinGeomSet" );
+    thick_set[0] = ( SET_TYPE::SET_NONE );
+    thin_set[0] = ( SET_TYPE::SET_ALL );
+    SetIntAnalysisInput( compgeom_name, "GeomSet", thick_set );
+    SetIntAnalysisInput( compgeom_name, "ThinGeomSet", thin_set );
+    ExecAnalysis( compgeom_name );
+}

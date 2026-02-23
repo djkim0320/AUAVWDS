@@ -1,0 +1,26 @@
+node_modules/
+dist/
+release/
+backend/build/
+backend/dist/
+backend/__pycache__/
+backend/**/*.pyc
+backend/.pytest_cache/
+tmp_asar_extract/
+tmp_work/
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+
+# Local/secret artifacts
+.env
+.env.*
+*.vkey
+*.csf
+Unnamed.*
+
+# IDE/editor
+.vscode/
+.idea/
