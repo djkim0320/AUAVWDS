@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,6 +57,10 @@ class ExportCfdRequest(BaseModel):
     output_path: str | None = None
 
 
+_SAVE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_EXPORT_SUFFIXES = {".obj", ".json", ".vsp3"}
+
+
 def create_app(work_dir: Path) -> FastAPI:
     app = FastAPI(title="AUAVWDS Backend", version="0.2.0")
 
@@ -109,6 +114,7 @@ def create_app(work_dir: Path) -> FastAPI:
         state = store.get()
         applied_commands: list[CommandEnvelope] = []
         tool_messages: list[str] = []
+        history = _dedupe_history([m.model_dump() for m in req.history], req.message)
 
         def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             nonlocal state
@@ -129,7 +135,7 @@ def create_app(work_dir: Path) -> FastAPI:
                 model=req.model,
                 base_url=req.base_url,
                 api_key=req.api_key,
-                history=[m.model_dump() for m in req.history],
+                history=history,
                 message=req.message,
                 state_summary=summarize_state(state),
                 tool_executor=execute_tool,
@@ -170,10 +176,13 @@ def create_app(work_dir: Path) -> FastAPI:
 
     @app.post("/saves/load")
     def load_state(req: LoadSaveRequest) -> dict[str, Any]:
+        _validate_save_id(req.save_id)
         try:
             loaded = saves.load(req.save_id)
-        except Exception as exc:
+        except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         store.set(loaded)
         return {
@@ -186,27 +195,22 @@ def create_app(work_dir: Path) -> FastAPI:
 
     @app.post("/saves/compare")
     def compare_state(req: CompareSaveRequest) -> dict[str, Any]:
+        _validate_save_id(req.left_id)
+        _validate_save_id(req.right_id)
         try:
             return saves.compare(req.left_id, req.right_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/export/cfd")
     def export_cfd(req: ExportCfdRequest) -> dict[str, Any]:
         state = store.get()
-        export_dir = work_dir / "exports"
-        export_dir.mkdir(parents=True, exist_ok=True)
-
-        if req.output_path:
-            out = Path(req.output_path)
-        else:
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            out = export_dir / f"wing_{stamp}.obj"
-
+        out = _build_export_path(work_dir, req.output_path)
         suffix = out.suffix.lower()
-        allowed = {".obj", ".json", ".vsp3"}
-        if suffix not in allowed:
-            raise HTTPException(status_code=400, detail=f"output_path suffix must be one of: {sorted(allowed)}")
 
         if suffix == ".vsp3":
             precision = state.analysis.precision_result
@@ -234,6 +238,41 @@ def create_app(work_dir: Path) -> FastAPI:
         return {"ok": True, "path": str(out), "format": "obj"}
 
     return app
+
+
+def _dedupe_history(history: list[dict[str, Any]], message: str) -> list[dict[str, Any]]:
+    if not history:
+        return history
+
+    latest = history[-1]
+    if latest.get("role") != "user":
+        return history
+
+    latest_text = str(latest.get("content") or "").strip()
+    if latest_text != message.strip():
+        return history
+    return history[:-1]
+
+
+def _validate_save_id(save_id: str) -> None:
+    if not _SAVE_ID_RE.fullmatch(save_id or ""):
+        raise HTTPException(status_code=400, detail="save_id must be a 32-character lowercase hex string.")
+
+
+def _build_export_path(work_dir: Path, requested_output: str | None) -> Path:
+    export_dir = (work_dir / "exports").resolve()
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    requested = (requested_output or "").strip()
+    suffix = ".obj"
+    if requested:
+        suffix = Path(requested).suffix.lower()
+
+    if suffix not in _EXPORT_SUFFIXES:
+        raise HTTPException(status_code=400, detail=f"output_path suffix must be one of: {sorted(_EXPORT_SUFFIXES)}")
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    return export_dir / f"wing_{stamp}{suffix}"
 
 
 def summarize_state(state: AppState) -> dict[str, Any]:

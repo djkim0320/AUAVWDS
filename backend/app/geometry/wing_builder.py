@@ -72,9 +72,9 @@ def build_wing_mesh(airfoil: AirfoilState, params: WingParams) -> tuple[WingMesh
         )
 
         base = len(vertices)
-        vertices.extend(root_ring)
-        vertices.extend(tip_mid_ring)
-        vertices.extend(tip_end_ring)
+        _append_ring(vertices, pressure_overlay, root_ring, span)
+        _append_ring(vertices, pressure_overlay, tip_mid_ring, span)
+        _append_ring(vertices, pressure_overlay, tip_end_ring, span)
 
         n = len(profile)
         root_start = base
@@ -85,9 +85,6 @@ def build_wing_mesh(airfoil: AirfoilState, params: WingParams) -> tuple[WingMesh
 
         _cap_ring(vertices, triangles, root_start, n, reverse=(side < 0), pressure_overlay=pressure_overlay)
         _cap_ring(vertices, triangles, end_start, n, reverse=(side > 0), pressure_overlay=pressure_overlay)
-
-        for p in root_ring + tip_mid_ring + tip_end_ring:
-            pressure_overlay.append(_mock_pressure(p[0], p[1], p[2], span))
 
     _finalize_pressure_len(pressure_overlay, len(vertices))
 
@@ -147,6 +144,18 @@ def _append_strip(triangles: list[list[int]], a_start: int, b_start: int, n: int
         b1 = b_start + i2
         triangles.append([a0, b0, a1])
         triangles.append([a1, b0, b1])
+
+
+def _append_ring(
+    vertices: list[list[float]],
+    pressure_overlay: list[float],
+    ring: Iterable[Iterable[float]],
+    span: float,
+) -> None:
+    for p in ring:
+        point = [float(p[0]), float(p[1]), float(p[2])]
+        vertices.append(point)
+        pressure_overlay.append(_mock_pressure(point[0], point[1], point[2], span))
 
 
 def _cap_ring(

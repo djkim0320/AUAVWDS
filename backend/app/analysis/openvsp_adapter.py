@@ -23,24 +23,15 @@ _ROW_RE = re.compile(
 
 
 def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[str, Any] | None = None) -> AnalysisResult:
-    payload = payload or {}
+    _ = payload or {}
 
     # Keep solver sweep aligned with frontend aerodynamic chart range.
     aoa_start = -10.0
     aoa_end = 20.0
     aoa_step = 1.0
-    mach = float(payload.get("mach", 0.08))
+    mach = 0.08
     speed_mps = max(0.1, mach * 340.3)
-
     reynolds: float | None = None
-    try:
-        raw_re = payload.get("reynolds")
-        if raw_re is not None:
-            rv = float(raw_re)
-            if rv > 0:
-                reynolds = rv
-    except Exception:
-        reynolds = None
 
     summary = state.airfoil.summary
     params = state.wing.params
@@ -66,7 +57,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
     run_dir = base_work / "precision_runs" / datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    solver = _resolve_solver_paths(payload)
+    solver = _resolve_solver_paths()
     if solver["vsp_exe"] is None:
         return _surrogate_precision_result(
             inputs=inputs,
@@ -92,7 +83,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=int(payload.get("solver_timeout_sec", 180)),
+            timeout=180,
             env=env,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
@@ -221,11 +212,8 @@ def _surrogate_precision_result(
     )
 
 
-def _resolve_solver_paths(payload: dict[str, Any]) -> dict[str, Path | None]:
-    user_dir = payload.get("solver_bin_dir")
+def _resolve_solver_paths() -> dict[str, Path | None]:
     candidates: list[Path] = []
-    if isinstance(user_dir, str) and user_dir.strip():
-        candidates.append(Path(user_dir))
 
     env_dir = os.getenv("AUAV_SOLVER_BIN_DIR")
     if env_dir:

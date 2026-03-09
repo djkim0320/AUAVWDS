@@ -46,111 +46,139 @@ const PROVIDER_META: Record<ProviderId, { label: string; defaultBase: string; ma
 
 const MODEL_CATALOG: ModelCard[] = [
   {
-    id: 'gemini-3.1-pro-preview-customtools',
+    id: 'gemini-3.1-pro-preview',
     provider: 'gemini',
-    title: 'Gemini 3.1 Pro',
-    subtitle: 'gemini-3.1-pro-preview-customtools',
-    description: '정밀 추론과 긴 컨텍스트 처리에 유리한 고성능 모델입니다.',
+    title: 'Gemini 3.1 Pro Preview',
+    subtitle: 'gemini-3.1-pro-preview',
+    description: '현재 Gemini 계열의 최신 상위 추론 모델로, 복잡한 설계 해석과 긴 컨텍스트 작업에 적합합니다.',
   },
   {
-    id: 'gemini-3-pro-preview',
+    id: 'gemini-3.1-pro-preview-customtools',
     provider: 'gemini',
-    title: 'Gemini 3 Pro',
-    subtitle: 'gemini-3-pro-preview',
-    description: '복잡한 설계 설명과 분석 해석 균형이 좋은 모델입니다.',
+    title: 'Gemini 3.1 Pro Custom Tools',
+    subtitle: 'gemini-3.1-pro-preview-customtools',
+    description: '함수 호출과 에이전트형 워크플로우를 더 강하게 쓰는 경우에 맞춘 Gemini 3.1 Pro 변형입니다.',
   },
   {
     id: 'gemini-3-flash-preview',
     provider: 'gemini',
     title: 'Gemini 3 Flash',
     subtitle: 'gemini-3-flash-preview',
-    description: '반복 대화와 빠른 설계 탐색에 적합한 고속 모델입니다.',
+    description: '최신 Gemini 3 계열의 고속 모델로, 빠른 반복 대화와 실시간 설계 탐색에 적합합니다.',
   },
   {
-    id: 'gemini-2.5-pro',
+    id: 'gemini-3.1-flash-lite-preview',
     provider: 'gemini',
-    title: 'Gemini 2.5 Pro',
-    subtitle: 'gemini-2.5-pro',
-    description: '안정적인 추론 품질로 복잡한 파라미터 조정에 유리합니다.',
+    title: 'Gemini 3.1 Flash-Lite',
+    subtitle: 'gemini-3.1-flash-lite-preview',
+    description: '아주 가벼운 최신 Gemini 3.1 계열로, 대량 요청과 짧은 응답 위주 작업에 유리합니다.',
   },
   {
     id: 'gemini-2.5-flash',
     provider: 'gemini',
     title: 'Gemini 2.5 Flash',
     subtitle: 'gemini-2.5-flash',
-    description: '즉답형 설계 확인과 경량 대화 처리에 적합합니다.',
+    description: '안정성이 검증된 현재 세대의 균형형 모델로, 일반 대화와 툴 호출 균형이 좋습니다.',
   },
   {
-    id: 'gpt-5.2-codex',
+    id: 'gemini-2.5-flash-lite',
+    provider: 'gemini',
+    title: 'Gemini 2.5 Flash-Lite',
+    subtitle: 'gemini-2.5-flash-lite',
+    description: '저비용 고속 응답이 필요한 경우에 유리한 안정형 경량 모델입니다.',
+  },
+  {
+    id: 'gemini-2.5-pro',
+    provider: 'gemini',
+    title: 'Gemini 2.5 Pro',
+    subtitle: 'gemini-2.5-pro',
+    description: '프리뷰보다 안정적인 고성능 선택지가 필요할 때 쓰기 좋은 2.5 상위 모델입니다.',
+  },
+  {
+    id: 'gpt-5.4',
     provider: 'openai',
-    title: 'GPT 5.2 Codex',
-    subtitle: 'gpt-5.2-codex',
-    description: '코드/도구 중심 워크플로우에 최적화된 모델입니다.',
+    title: 'GPT-5.4',
+    subtitle: 'gpt-5.4',
+    description: 'OpenAI의 최신 전문 작업용 상위 모델로, 가장 높은 정확도와 긴 문맥 처리에 유리합니다.',
   },
   {
     id: 'gpt-5.2',
     provider: 'openai',
-    title: 'GPT 5.2',
+    title: 'GPT-5.2',
     subtitle: 'gpt-5.2',
-    description: '범용 추론과 기술 대화 품질이 높은 주력 모델입니다.',
+    description: '현재 OpenAI의 주력 코딩·에이전트형 범용 모델로, 설계 대화와 툴 호출 모두에 잘 맞습니다.',
+  },
+  {
+    id: 'gpt-5.3-codex',
+    provider: 'openai',
+    title: 'GPT-5.3 Codex',
+    subtitle: 'gpt-5.3-codex',
+    description: '현재 OpenAI 계열의 최신 코딩 특화 모델로, 도구 호출과 긴 코드 작업에 적합합니다.',
   },
   {
     id: 'gpt-5-mini',
     provider: 'openai',
-    title: 'GPT 5 Mini',
+    title: 'GPT-5 mini',
     subtitle: 'gpt-5-mini',
-    description: '속도와 성능 균형이 필요한 반복 설계 대화에 적합합니다.',
+    description: '잘 정의된 반복 작업과 빠른 응답이 중요한 경우에 적합한 경량 GPT-5 모델입니다.',
   },
   {
     id: 'gpt-5-nano',
     provider: 'openai',
-    title: 'GPT 5 Nano',
+    title: 'GPT-5 nano',
     subtitle: 'gpt-5-nano',
-    description: '초경량 질의 응답과 빠른 피드백 루프에 적합합니다.',
-  },
-  {
-    id: 'claude-opus-4-6',
-    provider: 'anthropic',
-    title: 'Claude Opus 4.6',
-    subtitle: 'claude-opus-4-6',
-    description: '깊은 설계 논리 정리와 장문 해설 품질이 우수합니다.',
+    description: '가장 빠르고 저렴한 GPT-5 계열 모델로, 분류나 짧은 응답 위주 작업에 적합합니다.',
   },
   {
     id: 'claude-sonnet-4-6',
     provider: 'anthropic',
     title: 'Claude Sonnet 4.6',
     subtitle: 'claude-sonnet-4-6',
-    description: '일반 설계 대화와 분석 해설의 균형이 좋은 모델입니다.',
+    description: '현재 Claude 계열의 균형형 최신 모델로, 속도와 추론 품질을 함께 챙기기 좋습니다.',
+  },
+  {
+    id: 'claude-opus-4-6',
+    provider: 'anthropic',
+    title: 'Claude Opus 4.6',
+    subtitle: 'claude-opus-4-6',
+    description: '현재 Claude의 최고급 모델로, 가장 어려운 추론과 장문 설계 설명에 적합합니다.',
   },
   {
     id: 'claude-haiku-4-5',
     provider: 'anthropic',
     title: 'Claude Haiku 4.5',
     subtitle: 'claude-haiku-4-5',
-    description: '짧은 왕복 대화와 빠른 피드백에 유리한 모델입니다.',
+    description: '최신 Claude 경량 라인으로, 빠른 응답과 낮은 비용이 중요한 대화에 유리합니다.',
   },
   {
-    id: 'grok-4-1-fast',
+    id: 'grok-4-1-fast-reasoning',
     provider: 'grok',
-    title: 'Grok 4.1 Fast',
-    subtitle: 'grok-4-1-fast',
-    description: '빠른 응답성과 반복적 설계 탐색에 적합합니다.',
-  },
-  {
-    id: 'grok-4-0-fast',
-    provider: 'grok',
-    title: 'Grok 4.0 Fast',
-    subtitle: 'grok-4-0-fast',
-    description: '경량 추론 중심 워크플로우에서 효율적인 모델입니다.',
+    title: 'Grok 4.1 Fast Reasoning',
+    subtitle: 'grok-4-1-fast-reasoning',
+    description: '최신 xAI 추론형 모델로, 빠른 응답과 reasoning 중심 작업에 가장 잘 맞습니다.',
   },
   {
     id: 'grok-4',
     provider: 'grok',
     title: 'Grok 4',
     subtitle: 'grok-4',
-    description: '일반 목적 추론과 설계 대화용 기본 모델입니다.',
+    description: '최신 Grok 상위 일반 모델로, 폭넓은 추론과 멀티모달 이해에 적합합니다.',
+  },
+  {
+    id: 'grok-code-fast-1',
+    provider: 'grok',
+    title: 'Grok Code Fast 1',
+    subtitle: 'grok-code-fast-1',
+    description: '최신 xAI 코딩 특화 모델로, 코드 작성과 도구 호출이 많은 에이전트형 흐름에 맞춰져 있습니다.',
   },
 ];
+
+const DEFAULT_MODEL_BY_PROVIDER: Record<ProviderId, string> = {
+  gemini: 'gemini-3.1-pro-preview',
+  openai: 'gpt-5.4',
+  anthropic: 'claude-sonnet-4-6',
+  grok: 'grok-4-1-fast-reasoning',
+};
 
 function defaultState(): AppState {
   return {
@@ -171,14 +199,25 @@ function defaultState(): AppState {
   };
 }
 
+function findModelById(modelId: string): ModelCard | undefined {
+  return MODEL_CATALOG.find((m) => m.id === modelId);
+}
+
 function firstModelForProvider(provider: ProviderId): string {
+  const preferred = findModelById(DEFAULT_MODEL_BY_PROVIDER[provider]);
+  if (preferred) return preferred.id;
   const hit = MODEL_CATALOG.find((m) => m.provider === provider);
   return hit ? hit.id : MODEL_CATALOG[0].id;
 }
 
-function modelById(modelId: string): ModelCard {
-  const hit = MODEL_CATALOG.find((m) => m.id === modelId);
-  return hit ?? MODEL_CATALOG[0];
+function modelById(modelId: string, providerFallback?: ProviderId): ModelCard {
+  const hit = findModelById(modelId);
+  if (hit) return hit;
+  if (providerFallback) {
+    const providerHit = MODEL_CATALOG.find((m) => m.provider === providerFallback);
+    if (providerHit) return providerHit;
+  }
+  return MODEL_CATALOG[0];
 }
 
 function readProviderConfig(): Record<ProviderId, ProviderConfig> {
@@ -234,7 +273,7 @@ export default function App() {
   const dragRef = useRef<{ active: boolean; startX: number; startW: number }>({ active: false, startX: 0, startW: 320 });
   const chatListRef = useRef<HTMLDivElement | null>(null);
 
-  const activeModel = useMemo(() => modelById(model), [model]);
+  const activeModel = useMemo(() => modelById(model, provider), [model, provider]);
   const activeProviderMeta = PROVIDER_META[provider];
   const providerOrder: ProviderId[] = ['gemini', 'openai', 'anthropic', 'grok'];
 
@@ -273,7 +312,8 @@ export default function App() {
   }, [providerConfigs]);
 
   useEffect(() => {
-    if (modelById(model).provider !== provider) {
+    const active = findModelById(model);
+    if (!active || active.provider !== provider) {
       setModel(firstModelForProvider(provider));
     }
   }, [provider, model]);

@@ -10,12 +10,79 @@ from app.geometry.wing_builder import build_wing_mesh
 from app.models.state import AirfoilState, AppState, CommandEnvelope, WingParams, default_app_state
 
 
+_COMMAND_PAYLOAD_KEYS: dict[str, set[str]] = {
+    'SetAirfoil': {'code', 'custom'},
+    'SetWing': {'span_m', 'aspect_ratio', 'sweep_deg', 'taper_ratio', 'dihedral_deg', 'twist_deg'},
+    'BuildWingMesh': set(),
+    'RunPrecisionAnalysis': set(),
+    'Explain': set(),
+    'Undo': set(),
+    'Reset': set(),
+}
+
+_CUSTOM_AIRFOIL_KEYS = {
+    'max_camber_percent',
+    'max_camber_x_percent',
+    'thickness_percent',
+    'reflex_percent',
+    'camber',
+    'camber_pos',
+    'thickness',
+}
+
+_TXT_AIRFOIL = '\uc5d0\uc5b4\ud3ec\uc77c'
+_TXT_THICKNESS = '\ub450\uaed8'
+_TXT_CAMBER = '\ucea0\ubc84'
+_TXT_CAMBER_POS = '\ucea0\ubc84 \uc704\uce58'
+_TXT_WING_SHAPE = '\ub0a0\uac1c \ud615\uc0c1'
+_TXT_SPAN = '\uc2a4\ud32c'
+_TXT_SWEEP = '\uc2a4\uc717'
+_TXT_TAPER = '\ud14c\uc774\ud37c'
+_TXT_DIHEDRAL = '\ub514\ud5e4\ub4dc\ub7f4'
+_TXT_TWIST = '\ud2b8\uc704\uc2a4\ud2b8'
+_TXT_LATEST_SOURCE = '\ucd5c\uc2e0 \ud574\uc11d \ucd9c\ucc98'
+_TXT_CORE_PERF = '\ud575\uc2ec \uc131\ub2a5'
+_TXT_AOA = '\ubc1b\uc74c\uac01'
+_TXT_DEG = '\ub3c4'
+_TXT_AOA_SUMMARY = '\ubc1b\uc74c\uac01\ubcc4 \uc694\uc57d'
+_TXT_STABILITY = '\uc548\uc815'
+_TXT_NEUTRAL = '\uc911\ub9bd'
+_TXT_UNSTABLE = '\ubd88\uc548\uc815'
+_TXT_STABILITY_METRIC = '\uc548\uc815\uc131 \uc9c0\ud45c'
+_TXT_ZERO_LIFT_AOA = '\uc601\uc591\ub825 \ubc1b\uc74c\uac01'
+_TXT_ANALYSIS_AOA = '\ud574\uc11d \ubc1b\uc74c\uac01 \uc124\uc815'
+_TXT_INTERVAL = '\uac04\uaca9'
+_TXT_REYNOLDS = '\ud574\uc11d \ub808\uc774\ub180\uc988\uc218'
+_TXT_VSPAERO_SUMMARY = 'VSPAERO \uc694\uc57d'
+_TXT_NO_ANALYSIS = (
+    '\uc544\uc9c1 \uacf5\ub825 \ud574\uc11d \uacb0\uacfc\uac00 \uc5c6\uc2b5\ub2c8\ub2e4. '
+    '\ucc44\ud305\uc5d0\uc11c \uc815\ubc00 \ud574\uc11d\uc744 \uc694\uccad\ud558\uba74 '
+    '\ub370\uc774\ud130\ub97c \ubc14\ud0d5\uc73c\ub85c \uc124\uba85\ud574 \ub4dc\ub9b4 \uc218 \uc788\uc5b4\uc694.'
+)
+
+_VSPAERO_LABELS = {
+    'aoa_ld_max': 'L/D \ucd5c\ub300 \uc9c0\uc810 \ubc1b\uc74c\uac01',
+    'l_d_max': '\ucd5c\ub300 \uc591\ud56d\ube44(L/D)',
+    'cltot_ld_max': 'L/D \ucd5c\ub300 \uc9c0\uc810 \ucd1d \uc591\ub825\uacc4\uc218',
+    'cltot_max': '\ucd1d \uc591\ub825\uacc4\uc218 \ucd5c\ub300\uac12',
+    'cltot_min': '\ucd1d \uc591\ub825\uacc4\uc218 \ucd5c\uc18c\uac12',
+    'cdtot_ld_max': 'L/D \ucd5c\ub300 \uc9c0\uc810 \ucd1d \ud56d\ub825\uacc4\uc218',
+    'cdtot_min': '\ucd1d \ud56d\ub825\uacc4\uc218 \ucd5c\uc18c\uac12',
+    'cdtot_max': '\ucd1d \ud56d\ub825\uacc4\uc218 \ucd5c\ub300\uac12',
+    'cmytot_ld_max': 'L/D \ucd5c\ub300 \uc9c0\uc810 \ud53c\uce58 \ubaa8\uba58\ud2b8\uacc4\uc218',
+    'cmytot_max': '\ud53c\uce58 \ubaa8\uba58\ud2b8\uacc4\uc218 \ucd5c\ub300\uac12',
+    'cmytot_min': '\ud53c\uce58 \ubaa8\uba58\ud2b8\uacc4\uc218 \ucd5c\uc18c\uac12',
+    'e_ld_max': 'L/D \ucd5c\ub300 \uc9c0\uc810 \uc624\uc2a4\uc648\ub4dc \ud6a8\uc728',
+}
+
+
 class CommandEngine:
     def __init__(self, work_dir: Path):
         self.work_dir = Path(work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
     def execute(self, state: AppState, command: CommandEnvelope) -> tuple[AppState, str]:
+        command = self.validate_command(command)
         cmd_type = command.type
         payload = command.payload or {}
 
@@ -61,7 +128,7 @@ class CommandEngine:
         raise ValueError(f'Unsupported command type: {cmd_type}')
 
     def _set_airfoil(self, state: AppState, payload: dict[str, Any]) -> None:
-        code = str(payload.get('code') or payload.get('name') or '').strip()
+        code = str(payload.get('code') or '').strip()
         custom = payload.get('custom') if isinstance(payload.get('custom'), dict) else None
 
         if custom:
@@ -97,22 +164,28 @@ class CommandEngine:
         af = state.airfoil.summary
         wp = state.wing.params
         lines = [
-            f"에어포일: {af.code or '-'} (두께 {af.thickness_percent:.1f}%, 캠버 {af.max_camber_percent:.1f}%, 캠버 위치 {af.max_camber_x_percent:.1f}%c)",
             (
-                "날개 형상: "
-                f"스팬 {wp.span_m:.2f}m, AR {wp.aspect_ratio:.1f}, 스윕 {wp.sweep_deg:.1f}도, "
-                f"테이퍼 {wp.taper_ratio:.2f}, 상반각 {wp.dihedral_deg:.1f}도, 트위스트 {wp.twist_deg:.1f}도"
+                f"{_TXT_AIRFOIL}: {af.code or '-'} "
+                f"({_TXT_THICKNESS} {af.thickness_percent:.1f}%, {_TXT_CAMBER} {af.max_camber_percent:.1f}%, "
+                f"{_TXT_CAMBER_POS} {af.max_camber_x_percent:.1f}%c)"
+            ),
+            (
+                f"{_TXT_WING_SHAPE}: "
+                f"{_TXT_SPAN} {wp.span_m:.2f}m, AR {wp.aspect_ratio:.1f}, {_TXT_SWEEP} {wp.sweep_deg:.1f}{_TXT_DEG}, "
+                f"{_TXT_TAPER} {wp.taper_ratio:.2f}, {_TXT_DIHEDRAL} {wp.dihedral_deg:.1f}{_TXT_DEG}, "
+                f"{_TXT_TWIST} {wp.twist_deg:.1f}{_TXT_DEG}"
             ),
         ]
 
         active = state.analysis.precision_result
         if active and active.metrics:
             m = active.metrics
-            lines.append(f"최근 해석 출처: {active.source_label}")
+            lines.append(f"{_TXT_LATEST_SOURCE}: {active.source_label}")
             lines.append(
-                f"핵심 성능: 최대 양항비(L/D) {m.ld_max:.2f} @ 받음각 {m.ld_max_aoa:.1f}도, "
-                f"최대 양력계수(CLmax) {m.cl_max:.3f} @ {m.cl_max_aoa:.1f}도, "
-                f"최소 항력계수(CDmin) {m.cd_min:.4f} @ {m.cd_min_aoa:.1f}도"
+                f"{_TXT_CORE_PERF}: "
+                f"\ucd5c\ub300 \uc591\ud56d\ube44(L/D) {m.ld_max:.2f} @ {_TXT_AOA} {m.ld_max_aoa:.1f}{_TXT_DEG}, "
+                f"\ucd5c\ub300 \uc591\ub825\uacc4\uc218(CLmax) {m.cl_max:.3f} @ {m.cl_max_aoa:.1f}{_TXT_DEG}, "
+                f"\ucd5c\uc18c \ud56d\ub825\uacc4\uc218(CDmin) {m.cd_min:.4f} @ {m.cd_min_aoa:.1f}{_TXT_DEG}"
             )
 
             curve = active.curve
@@ -129,70 +202,59 @@ class CommandEngine:
                     cl_v = near_val(curve.aoa_deg, curve.cl, a)
                     cd_v = near_val(curve.aoa_deg, curve.cd, a)
                     ld_v = (cl_v / cd_v) if abs(cd_v) > 1e-9 else 0.0
-                    sample_parts.append(f"{a:.0f}도: CL {cl_v:.3f}, CD {cd_v:.4f}, L/D {ld_v:.2f}")
+                    sample_parts.append(f"{a:.0f}{_TXT_DEG}: CL {cl_v:.3f}, CD {cd_v:.4f}, L/D {ld_v:.2f}")
 
                 if sample_parts:
-                    lines.append("받음각별 요약: " + " | ".join(sample_parts))
+                    lines.append(f"{_TXT_AOA_SUMMARY}: " + ' | '.join(sample_parts))
 
-            stability = "안정" if m.cm_alpha < 0 else ("중립" if abs(m.cm_alpha) < 1e-6 else "불안정")
+            stability = _TXT_STABILITY if m.cm_alpha < 0 else (_TXT_NEUTRAL if abs(m.cm_alpha) < 1e-6 else _TXT_UNSTABLE)
             lines.append(
-                f"안정성/효율: Cm_alpha {m.cm_alpha:.4f}/rad ({stability}), "
-                f"영양력 받음각 {m.alpha_zero_lift:.2f}도, CD0 {m.cd_zero:.4f}, Oswald e {m.oswald_e:.3f}"
+                f"{_TXT_STABILITY_METRIC}: Cm_alpha {m.cm_alpha:.4f}/rad ({stability}), "
+                f"{_TXT_ZERO_LIFT_AOA} {m.alpha_zero_lift:.2f}{_TXT_DEG}, CD0 {m.cd_zero:.4f}, Oswald e {m.oswald_e:.3f}"
             )
 
             extra = active.extra_data or {}
-            pd = extra.get("precision_data")
+            pd = extra.get('precision_data')
             if isinstance(pd, dict):
-                a0 = pd.get("aoa_start")
-                a1 = pd.get("aoa_end")
-                st = pd.get("aoa_step")
+                a0 = pd.get('aoa_start')
+                a1 = pd.get('aoa_end')
+                st = pd.get('aoa_step')
                 if isinstance(a0, (int, float)) and isinstance(a1, (int, float)) and isinstance(st, (int, float)):
-                    lines.append(f"해석 스윕 설정: 받음각 {a0:.1f}도 ~ {a1:.1f}도, 간격 {st:.1f}도")
-                re_v = pd.get("reynolds")
+                    lines.append(
+                        f"{_TXT_ANALYSIS_AOA}: {a0:.1f}{_TXT_DEG} ~ {a1:.1f}{_TXT_DEG}, "
+                        f"{_TXT_INTERVAL} {st:.1f}{_TXT_DEG}"
+                    )
+                re_v = pd.get('reynolds')
                 if isinstance(re_v, (int, float)) and re_v > 0:
-                    lines.append(f"해석 레이놀즈수: {float(re_v):,.0f}")
+                    lines.append(f"{_TXT_REYNOLDS}: {float(re_v):,.0f}")
 
-            va = extra.get("vspaero_all_data")
+            va = extra.get('vspaero_all_data')
             if isinstance(va, dict):
-                label_map = {
-                    "aoa_ld_max": "L/D 최대 지점 받음각",
-                    "l_d_max": "최대 양항비(L/D)",
-                    "cltot_ld_max": "L/D 최대 지점 총 양력계수",
-                    "cltot_max": "총 양력계수 최대값",
-                    "cltot_min": "총 양력계수 최소값",
-                    "cdtot_ld_max": "L/D 최대 지점 총 항력계수",
-                    "cdtot_min": "총 항력계수 최소값",
-                    "cdtot_max": "총 항력계수 최대값",
-                    "cmytot_ld_max": "L/D 최대 지점 피치 모멘트계수",
-                    "cmytot_max": "피치 모멘트계수 최대값",
-                    "cmytot_min": "피치 모멘트계수 최소값",
-                    "e_ld_max": "L/D 최대 지점 오스왈드 효율",
-                }
                 ordered_keys = [
-                    "aoa_ld_max",
-                    "l_d_max",
-                    "cltot_ld_max",
-                    "cltot_max",
-                    "cltot_min",
-                    "cdtot_ld_max",
-                    "cdtot_min",
-                    "cdtot_max",
-                    "cmytot_ld_max",
-                    "cmytot_max",
-                    "cmytot_min",
-                    "e_ld_max",
+                    'aoa_ld_max',
+                    'l_d_max',
+                    'cltot_ld_max',
+                    'cltot_max',
+                    'cltot_min',
+                    'cdtot_ld_max',
+                    'cdtot_min',
+                    'cdtot_max',
+                    'cmytot_ld_max',
+                    'cmytot_max',
+                    'cmytot_min',
+                    'e_ld_max',
                 ]
                 vsp_parts = []
                 for key in ordered_keys:
                     val = va.get(key)
                     if isinstance(val, (int, float)):
-                        label = label_map.get(key, key)
+                        label = _VSPAERO_LABELS.get(key, key)
                         digits = 3 if abs(float(val)) >= 1 else 5
                         vsp_parts.append(f"{label} {float(val):.{digits}f}")
                 if vsp_parts:
-                    lines.append("VSPAERO 요약: " + " | ".join(vsp_parts))
+                    lines.append(f"{_TXT_VSPAERO_SUMMARY}: " + ' | '.join(vsp_parts))
         else:
-            lines.append("아직 공력 해석 결과가 없습니다. 채팅에서 정밀 해석을 요청하면 데이터 기반 해설이 가능해요.")
+            lines.append(_TXT_NO_ANALYSIS)
 
         return '\n'.join(lines)
 
@@ -211,4 +273,30 @@ class CommandEngine:
         ctype = alias.get(name)
         if not ctype:
             raise ValueError(f'Unknown tool/command: {name}')
-        return CommandEnvelope(type=ctype, payload=args)
+        return CommandEngine.validate_command(CommandEnvelope(type=ctype, payload=args))
+
+    @staticmethod
+    def validate_command(command: CommandEnvelope) -> CommandEnvelope:
+        payload = command.payload or {}
+        if not isinstance(payload, dict):
+            raise ValueError('Command payload must be an object.')
+
+        allowed = _COMMAND_PAYLOAD_KEYS.get(command.type)
+        if allowed is None:
+            raise ValueError(f'Unsupported command type: {command.type}')
+
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            raise ValueError(f'Unsupported payload keys for {command.type}: {", ".join(unknown)}')
+
+        clean_payload = dict(payload)
+        if command.type == 'SetAirfoil' and 'custom' in clean_payload:
+            custom = clean_payload.get('custom')
+            if not isinstance(custom, dict):
+                raise ValueError('SetAirfoil.custom must be an object.')
+            custom_unknown = sorted(set(custom) - _CUSTOM_AIRFOIL_KEYS)
+            if custom_unknown:
+                raise ValueError(f'Unsupported custom airfoil keys: {", ".join(custom_unknown)}')
+            clean_payload['custom'] = dict(custom)
+
+        return CommandEnvelope(type=command.type, payload=clean_payload)

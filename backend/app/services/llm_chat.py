@@ -55,15 +55,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         'name': 'RunPrecisionAnalysis',
         'description': 'Run precision analysis (OpenVSP+VSPAERO mode).',
-        'parameters': {
-            'type': 'object',
-            'properties': {
-                'aoa_start': {'type': 'number'},
-                'aoa_end': {'type': 'number'},
-                'aoa_step': {'type': 'number'},
-            },
-            'additionalProperties': False,
-        },
+        'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False},
     },
     {
         'name': 'Explain',
@@ -122,9 +114,16 @@ class LLMChatOrchestrator:
                 return {'models': sorted(models), 'source_url': url, 'error': None}
 
             if provider == 'anthropic':
-                # Anthropic public model-list endpoint is not guaranteed for all tiers.
-                static_models = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5']
-                return {'models': static_models, 'source_url': 'static', 'error': None}
+                url = f"{base_url.rstrip('/')}/v1/models"
+                headers = {
+                    'x-api-key': api_key,
+                    'anthropic-version': '2023-06-01',
+                }
+                res = requests.get(url, headers=headers, timeout=self.timeout_sec)
+                res.raise_for_status()
+                data = res.json()
+                models = [x.get('id') for x in data.get('data', []) if x.get('id')]
+                return {'models': sorted(models), 'source_url': url, 'error': None}
 
             return {'models': [], 'source_url': '', 'error': f'Unsupported provider: {provider}'}
         except Exception as exc:
