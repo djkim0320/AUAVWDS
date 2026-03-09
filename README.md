@@ -42,6 +42,22 @@ python -m pip install -r backend/requirements.txt
 npm run dev
 ```
 
+## 브라우저 개발/테스트 실행
+- 이 모드는 로컬 개발/Playwright 테스트 전용입니다. Electron 패키징을 대체하지 않습니다.
+- FastAPI backend와 Vite dev server를 함께 실행합니다.
+```bash
+npm run dev:web
+```
+- 브라우저에서 아래 주소로 접속합니다.
+```text
+http://127.0.0.1:5173
+```
+- 브라우저 모드도 기존 backend를 그대로 사용하므로 저장/불러오기/비교/내보내기 동작은 Electron과 같은 데이터를 사용합니다.
+- 실제 provider 호출 QA 기준:
+  - 설정에서 API 키 입력
+  - 모델 선택
+  - 채팅 요청 후 `tool call -> 상태 반영` 경로 확인
+
 ## 빌드/패키징
 - 렌더러 빌드
 ```bash

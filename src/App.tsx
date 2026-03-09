@@ -4,11 +4,13 @@ import AirfoilTab from './tabs/AirfoilTab';
 import Wing3DTab from './tabs/Wing3DTab';
 import AerodynamicsTab from './tabs/AerodynamicsTab';
 import type {
+  AnalysisConditions,
   AppState,
   ExportFormat,
   ProviderId,
   SaveSnapshotCompareResponse,
   SaveSnapshotRecord,
+  SolverId,
 } from './types';
 
 type TabId = 'airfoil' | 'wing3d' | 'aero';
@@ -195,9 +197,21 @@ function defaultState(): AppState {
       preview_mesh: null,
       planform_2d: null,
     },
-    analysis: { precision_result: null, mode: 'precision' },
+    analysis: {
+      results: { openvsp: null, neuralfoil: null },
+      active_solver: 'openvsp',
+      conditions: { aoa_start: -10, aoa_end: 20, aoa_step: 1, mach: 0.08, reynolds: null },
+    },
     history: [],
   };
+}
+
+function solverCommand(solver: SolverId): 'RunOpenVspAnalysis' | 'RunNeuralFoilAnalysis' {
+  return solver === 'neuralfoil' ? 'RunNeuralFoilAnalysis' : 'RunOpenVspAnalysis';
+}
+
+function hasAnyAnalysis(state: AppState): boolean {
+  return Boolean(state.analysis.results.openvsp || state.analysis.results.neuralfoil);
 }
 
 function findModelById(modelId: string): ModelCard | undefined {
@@ -270,6 +284,8 @@ export default function App() {
 
   const [isApplyingAirfoil, setIsApplyingAirfoil] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isRunningAnalysis, setIsRunningAnalysis] = useState(false);
+  const [isUpdatingConditions, setIsUpdatingConditions] = useState(false);
 
   const dragRef = useRef<{ active: boolean; startX: number; startW: number }>({ active: false, startX: 0, startW: 320 });
   const chatListRef = useRef<HTMLDivElement | null>(null);
@@ -413,13 +429,18 @@ export default function App() {
   }) {
     setIsApplyingAirfoil(true);
     try {
-      const hadPrecisionBefore = Boolean(state.analysis.precision_result);
+      const rerunSolver = state.analysis.active_solver;
+      const hadAnalysisBefore = hasAnyAnalysis(state);
       const setRes = await bridge.command({ command: { type: 'SetAirfoil', payload: { custom } } });
       const meshRes = await bridge.command({ command: { type: 'BuildWingMesh', payload: {} } });
-      if (hadPrecisionBefore) {
-        const precisionRes = await bridge.command({ command: { type: 'RunPrecisionAnalysis', payload: {} } });
-        setState(precisionRes.state ?? meshRes.state ?? setRes.state);
-        appendAssistantMessage('커스텀 에어포일을 적용했고, 기존 해석 이력이 있어서 정밀 공력해석까지 다시 갱신했어요.');
+      if (hadAnalysisBefore) {
+        const analysisRes = await bridge.command({ command: { type: solverCommand(rerunSolver), payload: {} } });
+        setState(analysisRes.state ?? meshRes.state ?? setRes.state);
+        appendAssistantMessage(
+          rerunSolver === 'neuralfoil'
+            ? '커스텀 에어포일을 적용했고, 기존 NeuralFoil 해석까지 다시 갱신했어요.'
+            : '커스텀 에어포일을 적용했고, 기존 OpenVSP 해석까지 다시 갱신했어요.',
+        );
       } else {
         setState(meshRes.state ?? setRes.state);
         appendAssistantMessage('커스텀 에어포일을 적용해 3D 형상만 빠르게 갱신했어요. 필요하면 정밀 공력해석을 실행해 주세요.');
@@ -474,6 +495,46 @@ export default function App() {
       appendAssistantMessage(`CFD 내보내기 실패: ${err?.message || String(err)}`);
     } finally {
       setIsExporting(false);
+    }
+  }
+
+  async function onRunAnalysis(solver: SolverId) {
+    setIsRunningAnalysis(true);
+    try {
+      const res = await bridge.command({ command: { type: solverCommand(solver), payload: {} } });
+      setState(res.state);
+      appendAssistantMessage(
+        solver === 'neuralfoil'
+          ? 'NeuralFoil 기반 날개 추정 해석을 실행했어요.'
+          : 'OpenVSP/VSPAERO 정밀 해석을 실행했어요.',
+      );
+      setActiveTab('aero');
+    } catch (err: any) {
+      appendAssistantMessage(`해석 실행 실패: ${err?.message || String(err)}`);
+    } finally {
+      setIsRunningAnalysis(false);
+    }
+  }
+
+  async function onSelectActiveSolver(solver: SolverId) {
+    try {
+      const res = await bridge.command({ command: { type: 'SetActiveSolver', payload: { solver } } });
+      setState(res.state);
+    } catch (err: any) {
+      appendAssistantMessage(`해석 결과 전환 실패: ${err?.message || String(err)}`);
+    }
+  }
+
+  async function onUpdateAnalysisConditions(conditions: AnalysisConditions) {
+    setIsUpdatingConditions(true);
+    try {
+      const res = await bridge.command({ command: { type: 'SetAnalysisConditions', payload: conditions } });
+      setState(res.state);
+      appendAssistantMessage('해석 조건을 업데이트했어요.');
+    } catch (err: any) {
+      appendAssistantMessage(`해석 조건 업데이트 실패: ${err?.message || String(err)}`);
+    } finally {
+      setIsUpdatingConditions(false);
     }
   }
 
@@ -663,7 +724,16 @@ export default function App() {
               isExporting={isExporting}
             />
           )}
-          {activeTab === 'aero' && <AerodynamicsTab analysis={state.analysis} />}
+          {activeTab === 'aero' && (
+            <AerodynamicsTab
+              analysis={state.analysis}
+              onRunAnalysis={onRunAnalysis}
+              onSelectSolver={onSelectActiveSolver}
+              onUpdateConditions={onUpdateAnalysisConditions}
+              isRunningAnalysis={isRunningAnalysis}
+              isUpdatingConditions={isUpdatingConditions}
+            />
+          )}
         </section>
 
         <aside className={`history-drawer ${showHistoryDrawer ? 'open' : ''}`}>

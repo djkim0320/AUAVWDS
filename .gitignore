@@ -8,6 +8,8 @@ backend/**/*.pyc
 backend/.pytest_cache/
 tmp_asar_extract/
 tmp_work/
+output/
+backend/work/
 *.log
 *.tmp
 *.bak

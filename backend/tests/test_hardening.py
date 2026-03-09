@@ -18,10 +18,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.analysis.naca import generate_custom_airfoil, generate_naca4
+from app.analysis.neuralfoil_adapter import run_neuralfoil_analysis
 from app.analysis.openvsp_adapter import run_precision_analysis
 from app.api import _build_export_path, create_app
 from app.geometry.wing_builder import _mock_pressure, build_wing_mesh
-from app.models.state import AirfoilState, AirfoilSummary, AppState, WingParams
+from app.models.state import AirfoilState, AirfoilSummary, AppState, WingParams, get_active_result, set_solver_result
 from app.services.state_store import SaveManager
 
 
@@ -89,6 +90,28 @@ class ApiHardeningTests(unittest.TestCase):
         self.assertTrue(exported.is_relative_to(export_dir))
         self.assertEqual(exported.suffix, '.json')
         self.assertTrue(exported.exists())
+
+    def test_analysis_conditions_and_active_solver_roundtrip_through_commands(self) -> None:
+        res = self.client.post(
+            '/command',
+            json={
+                'command': {
+                    'type': 'SetAnalysisConditions',
+                    'payload': {'aoa_start': -4, 'aoa_end': 12, 'aoa_step': 2, 'mach': 0.12, 'reynolds': 450000},
+                }
+            },
+        )
+        self.assertEqual(res.status_code, 200)
+        state = res.json()['state']
+        self.assertEqual(state['analysis']['conditions']['aoa_start'], -4.0)
+        self.assertEqual(state['analysis']['conditions']['aoa_end'], 12.0)
+        self.assertEqual(state['analysis']['conditions']['aoa_step'], 2.0)
+        self.assertEqual(state['analysis']['conditions']['mach'], 0.12)
+        self.assertEqual(state['analysis']['conditions']['reynolds'], 450000.0)
+
+        res = self.client.post('/command', json={'command': {'type': 'SetActiveSolver', 'payload': {'solver': 'neuralfoil'}}})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()['state']['analysis']['active_solver'], 'neuralfoil')
 
     def test_chat_and_command_updates_are_not_lost_under_concurrency(self) -> None:
         app = create_app(self.work_dir)
@@ -259,14 +282,82 @@ class PrecisionAnalysisTests(unittest.TestCase):
 
         self.assertEqual(fallback_result.analysis_mode, 'fallback')
         self.assertTrue(fallback_result.fallback_reason)
-        self.assertEqual(fallback_result.source_label, '근사 해석(Fallback)')
+        self.assertEqual(fallback_result.source_label, '정밀 해석(OpenVSP/VSPAERO, Fallback)')
+        self.assertEqual(fallback_result.extra_data['solver_id'], 'openvsp')
 
         self.assertEqual(real_result.analysis_mode, 'openvsp')
         self.assertIsNone(real_result.fallback_reason)
         self.assertEqual(real_result.source_label, '정밀 해석(OpenVSP/VSPAERO)')
         self.assertNotEqual(real_result.source_label, fallback_result.source_label)
         self.assertEqual(real_result.extra_data['solver_airfoil']['geometry_kind'], 'naca4')
+        self.assertEqual(real_result.extra_data['solver_id'], 'openvsp')
         self.assertTrue(vsp3_exists)
+
+
+class NeuralFoilAnalysisTests(unittest.TestCase):
+    def test_neuralfoil_analysis_produces_solver_specific_result(self) -> None:
+        state = AppState(airfoil=AirfoilState.model_validate(generate_naca4('2412')))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = run_neuralfoil_analysis(state, Path(tmp_dir))
+            inputs_path = Path(result.extra_data['inputs_path'])
+            outputs_path = Path(result.extra_data['outputs_path'])
+            processed_path = Path(result.extra_data['processed_result_path'])
+            inputs_exists = inputs_path.exists()
+            outputs_exists = outputs_path.exists()
+            processed_exists = processed_path.exists()
+
+        self.assertEqual(result.analysis_mode, 'neuralfoil')
+        self.assertIsNone(result.fallback_reason)
+        self.assertEqual(result.extra_data['solver_id'], 'neuralfoil')
+        self.assertEqual(result.extra_data['result_level'], 'wing_estimate_from_2d_solver')
+        self.assertTrue(inputs_exists)
+        self.assertTrue(outputs_exists)
+        self.assertTrue(processed_exists)
+        self.assertTrue(result.curve.aoa_deg)
+        self.assertTrue(result.curve.cl)
+
+    def test_neuralfoil_and_openvsp_results_can_coexist_and_active_result_switches(self) -> None:
+        state = AppState(airfoil=AirfoilState.model_validate(generate_naca4('2412')))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            solver_dir = work_dir / 'solver_bin'
+            solver_dir.mkdir(parents=True, exist_ok=True)
+            vsp_exe = solver_dir / 'vsp.exe'
+            vspaero_exe = solver_dir / 'vspaero.exe'
+            vsp_exe.write_text('', encoding='utf-8')
+            vspaero_exe.write_text('', encoding='utf-8')
+
+            stdout = '\n'.join(
+                [
+                    '1 0.0000 -2.0000 0.0800 0.0000 0.0000 -0.2000 0.0000 0.0000 0.0100 0.0000 0.0000 0.0000 -0.0200 0.8000',
+                    '1 0.0000 0.0000 0.0800 0.0000 0.0000 0.0000 0.0000 0.0000 0.0090 0.0000 0.0000 0.0000 -0.0100 0.8200',
+                    '1 0.0000 2.0000 0.0800 0.0000 0.0000 0.2000 0.0000 0.0000 0.0110 0.0000 0.0000 0.0000 0.0000 0.7800',
+                ]
+            )
+
+            def fake_subprocess_run(cmd, cwd, **kwargs):
+                Path(cwd, 'auav_case.vsp3').write_text('vsp3', encoding='utf-8')
+                return SimpleNamespace(returncode=0, stdout=stdout, stderr='')
+
+            with (
+                patch(
+                    'app.analysis.openvsp_adapter._resolve_solver_paths',
+                    return_value={'bin_dir': solver_dir, 'vsp_exe': vsp_exe, 'vspaero_exe': vspaero_exe},
+                ),
+                patch('app.analysis.openvsp_adapter.subprocess.run', side_effect=fake_subprocess_run),
+            ):
+                set_solver_result(state.analysis, 'openvsp', run_precision_analysis(state, work_dir / 'openvsp'))
+                set_solver_result(state.analysis, 'neuralfoil', run_neuralfoil_analysis(state, work_dir / 'neuralfoil'))
+
+        solver_id, active = get_active_result(state.analysis)
+        self.assertEqual(solver_id, 'neuralfoil')
+        self.assertIsNotNone(active)
+        self.assertIsNotNone(state.analysis.results.openvsp)
+        self.assertIsNotNone(state.analysis.results.neuralfoil)
+        self.assertEqual(state.analysis.results.openvsp.extra_data['solver_id'], 'openvsp')
+        self.assertEqual(state.analysis.results.neuralfoil.extra_data['solver_id'], 'neuralfoil')
 
 
 class SaveManagerTests(unittest.TestCase):
@@ -306,6 +397,26 @@ class SaveManagerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, 'Save is corrupted'):
                 manager.get_record(save_id)
+
+    def test_compare_detects_custom_airfoil_shape_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            manager = SaveManager(work_dir)
+
+            left_state = AppState(airfoil=AirfoilState.model_validate(generate_custom_airfoil(3.0, 35.0, 12.0)))
+            right_state = AppState(airfoil=AirfoilState.model_validate(generate_custom_airfoil(3.0, 35.0, 13.0)))
+
+            left = manager.save(left_state, 'custom-12')
+            right = manager.save(right_state, 'custom-13')
+            comparison = manager.compare(left['id'], right['id'])
+
+            changed = {diff['key']: diff for diff in comparison['diffs'] if diff['left'] != diff['right']}
+
+            self.assertIn('airfoil_thickness_percent', changed)
+            self.assertNotEqual(
+                left['summary']['airfoil']['shape_signature'],
+                right['summary']['airfoil']['shape_signature'],
+            )
 
 
 class GeometryConsistencyTests(unittest.TestCase):

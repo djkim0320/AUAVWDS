@@ -26,7 +26,10 @@ export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: 
   const [exportFormat, setExportFormat] = useState<ExportFormat>('obj');
 
   const precisionMeta = useMemo(() => {
-    if (!analysis.precision_result) {
+    const openvspResult = analysis.results.openvsp;
+    const activeResult = analysis.results[analysis.active_solver] || openvspResult || analysis.results.neuralfoil;
+
+    if (!activeResult) {
       return {
         analysisMode: null,
         linked: false,
@@ -36,22 +39,33 @@ export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: 
       };
     }
 
-    const result = analysis.precision_result;
+    const result = activeResult;
     const extra = result.extra_data as Record<string, unknown>;
     const solverMode = typeof extra?.solver_mode === 'string' ? extra.solver_mode : '';
-    const hasVsp3 = result.analysis_mode === 'openvsp' && typeof extra?.vsp3_path === 'string' && extra.vsp3_path.length > 0;
+    const openvspExtra = (openvspResult?.extra_data || {}) as Record<string, unknown>;
+    const hasVsp3 =
+      openvspResult?.analysis_mode === 'openvsp' &&
+      typeof openvspExtra?.vsp3_path === 'string' &&
+      openvspExtra.vsp3_path.length > 0;
     const linked = result.analysis_mode === 'openvsp' && (solverMode === 'openvsp-script' || hasVsp3);
 
     return {
       analysisMode: result.analysis_mode,
       linked,
       canExportVsp3: hasVsp3,
-      pillText: result.analysis_mode === 'openvsp' ? TXT_OPENVSP_LINKED : TXT_FALLBACK_RESULT,
+      pillText:
+        result.analysis_mode === 'openvsp'
+          ? TXT_OPENVSP_LINKED
+          : result.analysis_mode === 'neuralfoil'
+            ? 'NeuralFoil 연동'
+            : TXT_FALLBACK_RESULT,
       note: result.analysis_mode === 'fallback'
         ? (result.fallback_reason || TXT_NO_VSP3_FOR_FALLBACK)
-        : (hasVsp3 ? TXT_OPENVSP_WITH_VSP3 : TXT_OPENVSP_NO_VSP3),
+        : result.analysis_mode === 'neuralfoil'
+          ? 'NeuralFoil은 2D airfoil polar 기반 날개 추정 결과를 제공합니다.'
+          : (hasVsp3 ? TXT_OPENVSP_WITH_VSP3 : TXT_OPENVSP_NO_VSP3),
     };
-  }, [analysis.precision_result]);
+  }, [analysis.active_solver, analysis.results]);
 
   useEffect(() => {
     if (exportFormat === 'vsp3' && !precisionMeta.canExportVsp3) {

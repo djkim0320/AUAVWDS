@@ -1,5 +1,6 @@
 export type ProviderId = 'openai' | 'anthropic' | 'gemini' | 'grok';
-export type AnalysisMode = 'openvsp' | 'fallback';
+export type SolverId = 'openvsp' | 'neuralfoil';
+export type AnalysisMode = 'openvsp' | 'neuralfoil' | 'fallback';
 export type ExportFormat = 'obj' | 'json' | 'vsp3';
 
 export interface AirfoilSummary {
@@ -68,6 +69,14 @@ export interface DerivedMetrics {
   reynolds: number;
 }
 
+export interface AnalysisConditions {
+  aoa_start: number;
+  aoa_end: number;
+  aoa_step: number;
+  mach: number;
+  reynolds: number | null;
+}
+
 export interface AnalysisResult {
   source_label: string;
   curve: AeroCurve;
@@ -79,9 +88,15 @@ export interface AnalysisResult {
   created_at: string;
 }
 
+export interface SolverResults {
+  openvsp: AnalysisResult | null;
+  neuralfoil: AnalysisResult | null;
+}
+
 export interface AnalysisState {
-  precision_result: AnalysisResult | null;
-  mode: 'precision';
+  results: SolverResults;
+  active_solver: SolverId;
+  conditions: AnalysisConditions;
 }
 
 export interface AppState {
@@ -96,6 +111,10 @@ export interface CommandEnvelope {
     | 'SetAirfoil'
     | 'SetWing'
     | 'BuildWingMesh'
+    | 'SetAnalysisConditions'
+    | 'SetActiveSolver'
+    | 'RunOpenVspAnalysis'
+    | 'RunNeuralFoilAnalysis'
     | 'RunPrecisionAnalysis'
     | 'Explain'
     | 'Undo'

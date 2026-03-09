@@ -1,6 +1,7 @@
-﻿import ReactECharts from 'echarts-for-react';
+import { useEffect, useMemo, useState } from 'react';
+import ReactECharts from 'echarts-for-react';
 import SourceBadge from '../components/SourceBadge';
-import type { AnalysisResult, AnalysisState } from '../types';
+import type { AnalysisConditions, AnalysisResult, AnalysisState, SolverId } from '../types';
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, v));
@@ -61,13 +62,7 @@ const BASE_LABELS: Record<string, string> = {
   cmxtot: '롤 모멘트계수 CMx',
   cmytot: '피치 모멘트계수 CMy',
   cmztot: '요 모멘트계수 CMz',
-  cliw: '와류 유도 양력 CLiw',
-  cdiw: '와류 유도 항력 CDiw',
-  lodwake: '와류 양항비 LoDwake',
-  ewake: '와류 효율 Ewake',
-  t_qs: '추력계수 T/QS',
-  l2res: '수치 잔차 L2Res',
-  maxres: '최대 잔차 MaxRes',
+  analysis_confidence: '해석 신뢰도',
   wall_time: '해석 시간 Wall Time',
 };
 
@@ -90,21 +85,86 @@ function humanizeVspaeroKey(key: string): string {
   return `${label}${suffix}`;
 }
 
-export default function AerodynamicsTab({ analysis }: { analysis: AnalysisState }) {
-  const result: AnalysisResult | null = analysis.precision_result;
+function preferredResult(analysis: AnalysisState): { solver: SolverId | null; result: AnalysisResult | null } {
+  const active = analysis.results[analysis.active_solver];
+  if (active) return { solver: analysis.active_solver, result: active };
+  if (analysis.results.openvsp) return { solver: 'openvsp', result: analysis.results.openvsp };
+  if (analysis.results.neuralfoil) return { solver: 'neuralfoil', result: analysis.results.neuralfoil };
+  return { solver: null, result: null };
+}
+
+type Props = {
+  analysis: AnalysisState;
+  onRunAnalysis: (solver: SolverId) => Promise<void>;
+  onSelectSolver: (solver: SolverId) => Promise<void>;
+  onUpdateConditions: (conditions: AnalysisConditions) => Promise<void>;
+  isRunningAnalysis: boolean;
+  isUpdatingConditions: boolean;
+};
+
+export default function AerodynamicsTab({
+  analysis,
+  onRunAnalysis,
+  onSelectSolver,
+  onUpdateConditions,
+  isRunningAnalysis,
+  isUpdatingConditions,
+}: Props) {
+  const { solver: resultSolver, result } = preferredResult(analysis);
+  const [draft, setDraft] = useState<AnalysisConditions>(analysis.conditions);
+
+  useEffect(() => {
+    setDraft(analysis.conditions);
+  }, [analysis.conditions]);
+
+  const provenance = useMemo(() => {
+    if (!result) return null;
+    const extra = (result.extra_data || {}) as Record<string, unknown>;
+    const availableArtifacts = Array.isArray(extra.available_artifacts)
+      ? extra.available_artifacts.map(String)
+      : [
+          typeof extra.script_path === 'string' ? 'run_precision.vspscript' : null,
+          typeof extra.stdout_log === 'string' ? 'solver_stdout.log' : null,
+          typeof extra.stderr_log === 'string' ? 'solver_stderr.log' : null,
+          typeof extra.outputs_path === 'string' ? 'outputs.json' : null,
+          typeof extra.processed_result_path === 'string' ? 'processed_result.json' : null,
+          typeof extra.vsp3_path === 'string' ? 'auav_case.vsp3' : null,
+        ].filter(Boolean);
+
+    return {
+      solverLabel: String(extra.solver_label || (resultSolver === 'neuralfoil' ? 'NeuralFoil' : 'OpenVSP/VSPAERO')),
+      solverId: String(extra.solver_id || resultSolver || '-'),
+      resultLevel: String(extra.result_level || (result.analysis_mode === 'neuralfoil' ? 'wing_estimate_from_2d_solver' : 'wing_solver')),
+      correctionModel: String(extra.correction_model || extra.wing_correction_model || '-'),
+      limitationNote: String(extra.limitation_note || ''),
+      availableArtifacts,
+      solverAirfoil: extra.solver_airfoil as Record<string, unknown> | undefined,
+    };
+  }, [result, resultSolver]);
 
   if (!result) {
     return (
       <div className="canvas-workspace">
-        <div className="panel-title">Aerodynamics</div>
-        <div className="empty-state">아직 공력 데이터가 없어요. 채팅에서 해석을 요청해 주세요.</div>
+        <div className="panel-title-row">
+          <div className="panel-title">Aerodynamics</div>
+          <div className="solver-runner">
+            <button disabled={isRunningAnalysis} onClick={() => void onRunAnalysis('openvsp')}>OpenVSP 실행</button>
+            <button disabled={isRunningAnalysis} onClick={() => void onRunAnalysis('neuralfoil')}>NeuralFoil 실행</button>
+          </div>
+        </div>
+        <ConditionsEditor
+          draft={draft}
+          onDraftChange={setDraft}
+          onApply={onUpdateConditions}
+          isUpdating={isUpdatingConditions}
+        />
+        <div className="empty-state">아직 공력 데이터가 없어요. OpenVSP 또는 NeuralFoil 해석을 실행해 주세요.</div>
       </div>
     );
   }
 
   const c = result.curve;
   const m = result.metrics;
-
   const aoa = c.aoa_deg;
   const ld = c.cl.map((v, i) => {
     const cd = c.cd[i] || 0;
@@ -112,8 +172,8 @@ export default function AerodynamicsTab({ analysis }: { analysis: AnalysisState 
     return clamp(v / cd, -200, 200);
   });
 
-  const aoaPlotMin = -10;
-  const aoaPlotMax = 20;
+  const aoaPlotMin = Math.min(draft.aoa_start, Math.min(...aoa));
+  const aoaPlotMax = Math.max(draft.aoa_end, Math.max(...aoa));
   const plotIndices = aoa
     .map((a, idx) => ((a >= aoaPlotMin && a <= aoaPlotMax) ? idx : -1))
     .filter((idx) => idx >= 0);
@@ -131,9 +191,12 @@ export default function AerodynamicsTab({ analysis }: { analysis: AnalysisState 
 
   const precisionData = (result.extra_data?.precision_data as Record<string, unknown>) || null;
   const allData = (result.extra_data?.vspaero_all_data as Record<string, unknown>) || null;
+  const rawNeuralFoil = (result.extra_data?.raw_neuralfoil_output as Record<string, unknown>) || null;
   const vspaeroRows: Array<{ key: string; label: string; value: string }> = [];
-  if (allData && typeof allData === 'object') {
-    Object.entries(allData)
+  const metricSource = allData || rawNeuralFoil || precisionData;
+
+  if (metricSource && typeof metricSource === 'object') {
+    Object.entries(metricSource)
       .sort(([a], [b]) => a.localeCompare(b))
       .forEach(([k, v]) => {
         const n = toNumber(v);
@@ -141,26 +204,71 @@ export default function AerodynamicsTab({ analysis }: { analysis: AnalysisState 
         const digits = Math.abs(n) < 1 ? 5 : 4;
         vspaeroRows.push({ key: k, label: humanizeVspaeroKey(k), value: fmt(n, digits) });
       });
-  } else if (precisionData && typeof precisionData === 'object') {
-    Object.entries(precisionData).forEach(([k, v]) => {
-      const n = toNumber(v);
-      if (n === null) return;
-      const digits = Math.abs(n) < 1 ? 5 : 4;
-      vspaeroRows.push({ key: k, label: humanizeVspaeroKey(k), value: fmt(n, digits) });
-    });
   }
+
+  const solverButtons: SolverId[] = ['openvsp', 'neuralfoil'];
 
   return (
     <div className="canvas-workspace aero-ui">
       <div className="panel-title-row">
         <div className="panel-title">공력 해석 결과</div>
-        <SourceBadge label={result.source_label} mode={result.analysis_mode} />
+        <div className="solver-runner">
+          <button disabled={isRunningAnalysis} onClick={() => void onRunAnalysis('openvsp')}>OpenVSP 실행</button>
+          <button disabled={isRunningAnalysis} onClick={() => void onRunAnalysis('neuralfoil')}>NeuralFoil 실행</button>
+          <SourceBadge label={result.source_label} mode={result.analysis_mode} />
+        </div>
       </div>
+
+      <div className="solver-selector-row">
+        {solverButtons.map((solver) => {
+          const available = Boolean(analysis.results[solver]);
+          const selected = analysis.active_solver === solver;
+          return (
+            <button
+              key={solver}
+              className={`solver-switch ${selected ? 'selected' : ''}`}
+              disabled={!available}
+              onClick={() => void onSelectSolver(solver)}
+            >
+              {solver === 'openvsp' ? 'OpenVSP/VSPAERO' : 'NeuralFoil'}
+            </button>
+          );
+        })}
+      </div>
+
+      <ConditionsEditor
+        draft={draft}
+        onDraftChange={setDraft}
+        onApply={onUpdateConditions}
+        isUpdating={isUpdatingConditions}
+      />
 
       {result.analysis_mode === 'fallback' && (
         <div className="analysis-alert fallback">
-          실제 OpenVSP/VSPAERO 결과가 아니라 근사 해석 결과입니다.
+          선택한 solver 경로가 fallback으로 전환되었습니다.
           {result.fallback_reason ? ` 사유: ${result.fallback_reason}` : ''}
+        </div>
+      )}
+
+      {provenance && (
+        <div className="provenance-grid">
+          <div className="provenance-card">
+            <div className="provenance-title">Solver provenance</div>
+            <div className="kv"><span>Solver</span><strong>{provenance.solverLabel}</strong></div>
+            <div className="kv"><span>Solver ID</span><strong>{provenance.solverId}</strong></div>
+            <div className="kv"><span>Result level</span><strong>{provenance.resultLevel}</strong></div>
+            <div className="kv"><span>Correction</span><strong>{provenance.correctionModel}</strong></div>
+            <div className="kv"><span>Airfoil rep.</span><strong>{String(provenance.solverAirfoil?.representation_label || provenance.solverAirfoil?.geometry_kind || '-')}</strong></div>
+          </div>
+          <div className="provenance-card">
+            <div className="provenance-title">Artifacts & notes</div>
+            <div className="provenance-artifacts">
+              {provenance.availableArtifacts.length > 0
+                ? provenance.availableArtifacts.map((item) => <span key={item} className="metric-chip">{item}</span>)
+                : <span className="muted">기록된 아티팩트 없음</span>}
+            </div>
+            {provenance.limitationNote && <div className="solver-note provenance-note">{provenance.limitationNote}</div>}
+          </div>
         </div>
       )}
 
@@ -178,9 +286,9 @@ export default function AerodynamicsTab({ analysis }: { analysis: AnalysisState 
       </div>
 
       <div className="chart-grid">
-        <Chart title="양력계수 (CL)" x={aoaPlot} y={clPlot} color="#70bbff" yName="CL" />
-        <Chart title="양항비 (L/D)" x={aoaPlot} y={ldPlot} color="#efb35b" yName="L/D" />
-        <Chart title="항력계수 (CD)" x={aoaPlot} y={cdPlot} color="#6ce8be" yName="CD" />
+        <Chart title="양력계수 (CL)" x={aoaPlot} y={clPlot} color="#70bbff" yName="CL" xMin={aoaPlotMin} xMax={aoaPlotMax} />
+        <Chart title="양항비 (L/D)" x={aoaPlot} y={ldPlot} color="#efb35b" yName="L/D" xMin={aoaPlotMin} xMax={aoaPlotMax} />
+        <Chart title="항력계수 (CD)" x={aoaPlot} y={cdPlot} color="#6ce8be" yName="CD" xMin={aoaPlotMin} xMax={aoaPlotMax} />
       </div>
 
       <div className="aero-detail-grid">
@@ -204,9 +312,9 @@ export default function AerodynamicsTab({ analysis }: { analysis: AnalysisState 
       </div>
 
       <section className="vsp-extra-card">
-        <h4>VSPAERO 전체 데이터</h4>
+        <h4>{resultSolver === 'neuralfoil' ? 'NeuralFoil / 보정 메타데이터' : 'VSPAERO 전체 데이터'}</h4>
         <div className="vsp-extra-grid">
-          {vspaeroRows.length === 0 && <div className="muted">표시할 VSPAERO 데이터가 없습니다.</div>}
+          {vspaeroRows.length === 0 && <div className="muted">표시할 solver 데이터가 없습니다.</div>}
           {vspaeroRows.map((row) => (
             <div key={row.key} className="extra-item">
               <span>{row.label}</span>
@@ -231,7 +339,92 @@ function Metric({ title, value, desc, emphasize = false }: { title: string; valu
   );
 }
 
-function Chart({ title, x, y, color, yName }: { title: string; x: number[]; y: number[]; color: string; yName: string }) {
+function ConditionsEditor({
+  draft,
+  onDraftChange,
+  onApply,
+  isUpdating,
+}: {
+  draft: AnalysisConditions;
+  onDraftChange: (conditions: AnalysisConditions) => void;
+  onApply: (conditions: AnalysisConditions) => Promise<void>;
+  isUpdating: boolean;
+}) {
+  return (
+    <div className="conditions-card">
+      <div className="provenance-title">Analysis conditions</div>
+      <div className="conditions-grid">
+        <NumberField label="AoA start" value={draft.aoa_start} step={0.5} onChange={(value) => onDraftChange({ ...draft, aoa_start: value })} />
+        <NumberField label="AoA end" value={draft.aoa_end} step={0.5} onChange={(value) => onDraftChange({ ...draft, aoa_end: value })} />
+        <NumberField label="AoA step" value={draft.aoa_step} step={0.25} onChange={(value) => onDraftChange({ ...draft, aoa_step: value })} />
+        <NumberField label="Mach" value={draft.mach} step={0.01} onChange={(value) => onDraftChange({ ...draft, mach: value })} />
+        <NumberField
+          label="Reynolds"
+          value={draft.reynolds ?? 0}
+          step={10000}
+          allowEmpty
+          onChange={(value) => onDraftChange({ ...draft, reynolds: value > 0 ? value : null })}
+        />
+      </div>
+      <div className="conditions-actions">
+        <button disabled={isUpdating} onClick={() => void onApply(draft)}>
+          {isUpdating ? '조건 저장 중...' : '조건 적용'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function NumberField({
+  label,
+  value,
+  step,
+  onChange,
+  allowEmpty = false,
+}: {
+  label: string;
+  value: number;
+  step: number;
+  onChange: (value: number) => void;
+  allowEmpty?: boolean;
+}) {
+  return (
+    <label className="condition-field">
+      <span>{label}</span>
+      <input
+        type="number"
+        value={allowEmpty && !Number.isFinite(value) ? '' : value}
+        step={step}
+        onChange={(e) => {
+          const next = e.target.value;
+          if (allowEmpty && next === '') {
+            onChange(0);
+            return;
+          }
+          onChange(Number(next));
+        }}
+      />
+    </label>
+  );
+}
+
+function Chart({
+  title,
+  x,
+  y,
+  color,
+  yName,
+  xMin,
+  xMax,
+}: {
+  title: string;
+  x: number[];
+  y: number[];
+  color: string;
+  yName: string;
+  xMin: number;
+  xMax: number;
+}) {
   if (!x.length || !y.length) {
     return (
       <div className="chart-card">
@@ -242,9 +435,6 @@ function Chart({ title, x, y, color, yName }: { title: string; x: number[]; y: n
   }
 
   const points = x.map((v, i) => [toNumber(v) ?? 0, toNumber(y[i]) ?? 0]);
-  const xMin = -10;
-  const xMax = 20;
-
   const finiteY = y.filter((v) => Number.isFinite(v));
   const minY = finiteY.length ? Math.min(...finiteY) : 0;
   const maxY = finiteY.length ? Math.max(...finiteY) : 1;
@@ -273,7 +463,6 @@ function Chart({ title, x, y, color, yName }: { title: string; x: number[]; y: n
             min: xMin,
             max: xMax,
             splitNumber: 6,
-            interval: 5,
             axisLine: { lineStyle: { color: '#28425f' } },
             splitLine: { lineStyle: { color: '#162a42' } },
             axisLabel: {

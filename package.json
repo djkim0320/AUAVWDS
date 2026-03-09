@@ -7,10 +7,13 @@
   "scripts": {
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:renderer": "vite",
+    "dev:renderer:web": "cross-env VITE_ENABLE_WEB_BRIDGE=1 vite",
     "dev:electron": "wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
     "build": "vite build",
     "backend:dev": "python backend/main.py",
+    "backend:dev:web": "cross-env AUAV_ENABLE_WEB_BRIDGE=1 AUAV_BACKEND_HOST=127.0.0.1 AUAV_BACKEND_PORT=18080 python backend/main.py",
     "backend:build": "powershell -ExecutionPolicy Bypass -File ./scripts/build_backend.ps1",
+    "dev:web": "concurrently -k \"npm:backend:dev:web\" \"npm:dev:renderer:web\"",
     "guard:package": "node ./scripts/ensure-no-web-bridge.cjs",
     "pack:unpacked": "npm run backend:build && cross-env VITE_ENABLE_WEB_BRIDGE=0 npm run build && electron-builder --config electron-builder.yml --win --dir",
     "release:unpacked": "npm run pack:unpacked",

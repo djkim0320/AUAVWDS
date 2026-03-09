@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 
 from app.analysis.common import AeroInputs, build_surrogate_curve, derive_metrics
-from app.models.state import AeroCurve, AirfoilState, AnalysisResult, AppState
+from app.models.state import AeroCurve, AirfoilState, AnalysisResult, AppState, source_label_for
 
 
 _NUM = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?"
@@ -21,20 +21,18 @@ _ROW_RE = re.compile(
     rf"({_NUM})\s+({_NUM})\s+({_NUM})\s+({_NUM})\s+({_NUM})"
 )
 _NACA4_RE = re.compile(r"(\d{4})")
-_SOURCE_LABEL_OPENVSP = "정밀 해석(OpenVSP/VSPAERO)"
-_SOURCE_LABEL_FALLBACK = "근사 해석(Fallback)"
 
 
 def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[str, Any] | None = None) -> AnalysisResult:
     _ = payload or {}
 
-    # Keep solver sweep aligned with frontend aerodynamic chart range.
-    aoa_start = -10.0
-    aoa_end = 20.0
-    aoa_step = 1.0
-    mach = 0.08
+    conditions = state.analysis.conditions
+    aoa_start = float(conditions.aoa_start)
+    aoa_end = float(conditions.aoa_end)
+    aoa_step = max(0.25, float(conditions.aoa_step))
+    mach = max(0.01, float(conditions.mach))
     speed_mps = max(0.1, mach * 340.3)
-    reynolds: float | None = None
+    reynolds = float(conditions.reynolds) if conditions.reynolds and float(conditions.reynolds) > 0 else None
 
     summary = state.airfoil.summary
     params = state.wing.params
@@ -63,12 +61,13 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
     try:
         solver_airfoil, airfoil_error = _prepare_solver_airfoil(state.airfoil, run_dir)
         if airfoil_error:
-            return _surrogate_precision_result(
+            return _openvsp_fallback_result(
                 inputs=inputs,
                 params=params.model_dump(),
                 summary=summary.model_dump(),
                 run_dir=run_dir,
                 reason=airfoil_error,
+                conditions=conditions.model_dump(),
                 solver_extra={"solver_airfoil": solver_airfoil},
             )
 
@@ -78,12 +77,13 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
 
         solver = _resolve_solver_paths()
         if solver["vsp_exe"] is None:
-            return _surrogate_precision_result(
+            return _openvsp_fallback_result(
                 inputs=inputs,
                 params=params.model_dump(),
                 summary=summary.model_dump(),
                 run_dir=run_dir,
                 reason="OpenVSP solver binary not found. Expected vsp.exe in third_party/openvsp/win64 or AUAV_SOLVER_BIN_DIR.",
+                conditions=conditions.model_dump(),
                 solver_extra={
                     "script_path": str(script_path),
                     "solver_airfoil": case["solver_airfoil"],
@@ -112,12 +112,13 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
         (run_dir / "solver_stderr.log").write_text(stderr, encoding="utf-8")
 
         if proc.returncode != 0:
-            return _surrogate_precision_result(
+            return _openvsp_fallback_result(
                 inputs=inputs,
                 params=params.model_dump(),
                 summary=summary.model_dump(),
                 run_dir=run_dir,
                 reason=f"OpenVSP solver returned non-zero exit code: {proc.returncode}",
+                conditions=conditions.model_dump(),
                 solver_extra={
                     "stdout_tail": _tail(stdout),
                     "stderr_tail": _tail(stderr),
@@ -129,12 +130,13 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
 
         parsed = _parse_vspaero_table(stdout)
         if not parsed["aoa"]:
-            return _surrogate_precision_result(
+            return _openvsp_fallback_result(
                 inputs=inputs,
                 params=params.model_dump(),
                 summary=summary.model_dump(),
                 run_dir=run_dir,
                 reason="Solver ran but no aerodynamic table rows were parsed from stdout.",
+                conditions=conditions.model_dump(),
                 solver_extra={
                     "stdout_tail": _tail(stdout),
                     "command": cmd,
@@ -144,7 +146,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             )
 
         raw_aoa = list(parsed["aoa"])
-        parsed = _resample_curve_to_unit_aoa(parsed, aoa_start=aoa_start, aoa_end=aoa_end, aoa_step=1.0)
+        parsed = _resample_curve_to_unit_aoa(parsed, aoa_start=aoa_start, aoa_end=aoa_end, aoa_step=aoa_step)
 
         curve = AeroCurve(
             aoa_deg=[round(x, 6) for x in parsed["aoa"]],
@@ -159,8 +161,11 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             curve, metrics, case["sref"], case["cref"], case["bref"], raw_aoa=raw_aoa
         )
         vspaero_all_data = _build_vspaero_all_data(run_dir / "auav_case.polar")
+        vsp3 = run_dir / "auav_case.vsp3"
 
         extra_data: dict[str, Any] = {
+            "solver_id": "openvsp",
+            "solver_label": "OpenVSP/VSPAERO",
             "solver_mode": "openvsp-script",
             "solver_bin_dir": str(solver["bin_dir"]),
             "vsp_exe": str(solver["vsp_exe"]),
@@ -168,22 +173,32 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             "script_path": str(script_path),
             "stdout_log": str(run_dir / "solver_stdout.log"),
             "stderr_log": str(run_dir / "solver_stderr.log"),
+            "run_dir": str(run_dir),
             "row_count": len(curve.aoa_deg),
             "row_count_raw": len(raw_aoa),
             "Sref": case["sref"],
             "Cref": case["cref"],
             "Bref": case["bref"],
+            "result_level": "wing_solver",
+            "analysis_conditions": conditions.model_dump(),
             "solver_airfoil": case["solver_airfoil"],
             "precision_data": precision_data,
             "vspaero_all_data": vspaero_all_data,
+            "available_artifacts": [
+                "run_precision.vspscript",
+                "solver_stdout.log",
+                "solver_stderr.log",
+                "auav_case.polar" if vspaero_all_data else None,
+                "auav_case.vsp3" if vsp3.exists() else None,
+            ],
         }
 
-        vsp3 = run_dir / "auav_case.vsp3"
         if vsp3.exists():
             extra_data["vsp3_path"] = str(vsp3)
+        extra_data["available_artifacts"] = [item for item in extra_data["available_artifacts"] if item]
 
         return AnalysisResult(
-            source_label=_SOURCE_LABEL_OPENVSP,
+            source_label=source_label_for("openvsp", "openvsp"),
             curve=curve,
             metrics=metrics,
             analysis_mode="openvsp",
@@ -192,32 +207,35 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             notes=_build_openvsp_notes(case["solver_airfoil"]),
         )
     except subprocess.TimeoutExpired:
-        return _surrogate_precision_result(
+        return _openvsp_fallback_result(
             inputs=inputs,
             params=params.model_dump(),
             summary=summary.model_dump(),
             run_dir=run_dir,
             reason="OpenVSP solver timed out.",
+            conditions=conditions.model_dump(),
             solver_extra={"solver_airfoil": _requested_airfoil_meta(state.airfoil)},
         )
     except Exception as exc:
-        return _surrogate_precision_result(
+        return _openvsp_fallback_result(
             inputs=inputs,
             params=params.model_dump(),
             summary=summary.model_dump(),
             run_dir=run_dir,
             reason=f"OpenVSP solver execution failed: {exc}",
+            conditions=conditions.model_dump(),
             solver_extra={"solver_airfoil": _requested_airfoil_meta(state.airfoil)},
         )
 
 
-def _surrogate_precision_result(
+def _openvsp_fallback_result(
     *,
     inputs: AeroInputs,
     params: dict[str, Any],
     summary: dict[str, Any],
     run_dir: Path,
     reason: str,
+    conditions: dict[str, Any],
     solver_extra: dict[str, Any] | None = None,
 ) -> AnalysisResult:
     curve, metrics = build_surrogate_curve(inputs, precision_mode=True)
@@ -227,19 +245,24 @@ def _surrogate_precision_result(
     precision_data = _build_precision_data(curve, metrics, sref, cref, bref)
 
     extra_data: dict[str, Any] = {
+        "solver_id": "openvsp",
+        "solver_label": "OpenVSP/VSPAERO",
         "solver_mode": "surrogate-fallback",
         "reason": reason,
         "fallback_reason": reason,
         "params": params,
         "airfoil_summary": summary,
         "run_dir": str(run_dir),
+        "analysis_conditions": conditions,
+        "result_level": "wing_solver_fallback",
         "precision_data": precision_data,
+        "available_artifacts": [],
     }
     if solver_extra:
         extra_data.update(solver_extra)
 
     return AnalysisResult(
-        source_label=_SOURCE_LABEL_FALLBACK,
+        source_label=source_label_for("openvsp", "fallback"),
         curve=curve,
         metrics=metrics,
         analysis_mode="fallback",

@@ -505,6 +505,12 @@ button:disabled {
   color: #ffd394;
 }
 
+.source-badge.neuralfoil {
+  border-color: #3a5aa2;
+  background: #12264a;
+  color: #9fc5ff;
+}
+
 .airfoil-controls {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -649,6 +655,106 @@ button.ghost,
   color: #ffd8a7;
 }
 
+.solver-note.provenance-note {
+  margin-top: 8px;
+  margin-bottom: 0;
+}
+
+.solver-runner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.solver-runner button {
+  height: 34px;
+  padding: 0 10px;
+}
+
+.solver-selector-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.solver-switch {
+  height: 34px;
+  padding: 0 12px;
+}
+
+.solver-switch.selected {
+  border-color: #77bbff;
+  background: #102744;
+  color: #d9ecff;
+  font-weight: 700;
+}
+
+.conditions-card {
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #08162c;
+  padding: 8px 10px;
+}
+
+.conditions-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.condition-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #8ea4bf;
+}
+
+.condition-field input {
+  height: 34px;
+  padding: 0 10px;
+}
+
+.conditions-actions {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.conditions-actions button {
+  height: 34px;
+  padding: 0 12px;
+}
+
+.provenance-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.provenance-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #08172d;
+  padding: 8px 10px;
+}
+
+.provenance-title {
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #aac0da;
+  font-weight: 700;
+}
+
+.provenance-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .wing-meta {
   display: flex;
   gap: 6px;
@@ -680,6 +786,7 @@ button.ghost,
   justify-content: center;
   color: #90a8c2;
   font-size: 13px;
+  pointer-events: none;
 }
 
 .scale-overlay {

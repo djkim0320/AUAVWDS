@@ -5,15 +5,30 @@ from pathlib import Path
 from typing import Any
 
 from app.analysis.naca import generate_custom_airfoil, generate_naca4
+from app.analysis.neuralfoil_adapter import run_neuralfoil_analysis
 from app.analysis.openvsp_adapter import run_precision_analysis
 from app.geometry.wing_builder import build_wing_mesh
-from app.models.state import AirfoilState, AppState, CommandEnvelope, WingParams, default_app_state
+from app.models.state import (
+    AnalysisConditions,
+    AirfoilState,
+    AppState,
+    CommandEnvelope,
+    WingParams,
+    clear_solver_results,
+    default_app_state,
+    get_active_result,
+    set_solver_result,
+)
 
 
 _COMMAND_PAYLOAD_KEYS: dict[str, set[str]] = {
     'SetAirfoil': {'code', 'custom'},
     'SetWing': {'span_m', 'aspect_ratio', 'sweep_deg', 'taper_ratio', 'dihedral_deg', 'twist_deg'},
     'BuildWingMesh': set(),
+    'SetAnalysisConditions': {'aoa_start', 'aoa_end', 'aoa_step', 'mach', 'reynolds'},
+    'SetActiveSolver': {'solver'},
+    'RunOpenVspAnalysis': set(),
+    'RunNeuralFoilAnalysis': set(),
     'RunPrecisionAnalysis': set(),
     'Explain': set(),
     'Undo': set(),
@@ -106,10 +121,12 @@ class CommandEngine:
 
         if cmd_type == 'SetAirfoil':
             self._set_airfoil(state, payload)
+            clear_solver_results(state.analysis)
             return state, 'Airfoil updated.'
 
         if cmd_type == 'SetWing':
             self._set_wing(state, payload)
+            clear_solver_results(state.analysis)
             return state, 'Wing parameters updated.'
 
         if cmd_type == 'BuildWingMesh':
@@ -120,13 +137,30 @@ class CommandEngine:
             state.wing.planform_2d = planform
             return state, '3D wing mesh generated.'
 
-        if cmd_type == 'RunPrecisionAnalysis':
+        if cmd_type == 'SetAnalysisConditions':
+            self._set_analysis_conditions(state, payload)
+            return state, 'Analysis conditions updated.'
+
+        if cmd_type == 'SetActiveSolver':
+            self._set_active_solver(state, payload)
+            return state, 'Active solver changed.'
+
+        if cmd_type == 'RunOpenVspAnalysis':
             if not state.airfoil.upper:
                 self._set_airfoil(state, {'code': '2412'})
             result = run_precision_analysis(state, self.work_dir, payload)
-            state.analysis.precision_result = result
-            state.analysis.mode = 'precision'
-            return state, 'Precision aerodynamic analysis completed.'
+            set_solver_result(state.analysis, 'openvsp', result)
+            return state, 'OpenVSP/VSPAERO analysis completed.'
+
+        if cmd_type == 'RunNeuralFoilAnalysis':
+            if not state.airfoil.upper:
+                self._set_airfoil(state, {'code': '2412'})
+            result = run_neuralfoil_analysis(state, self.work_dir, payload)
+            set_solver_result(state.analysis, 'neuralfoil', result)
+            return state, 'NeuralFoil wing-estimate analysis completed.'
+
+        if cmd_type == 'RunPrecisionAnalysis':
+            return self.execute(state, CommandEnvelope(type='RunOpenVspAnalysis', payload=payload))
 
         raise ValueError(f'Unsupported command type: {cmd_type}')
 
@@ -163,6 +197,34 @@ class CommandEngine:
 
         state.wing.params = WingParams.model_validate(p)
 
+    def _set_analysis_conditions(self, state: AppState, payload: dict[str, Any]) -> None:
+        current = state.analysis.conditions.model_dump()
+        for key in ('aoa_start', 'aoa_end', 'aoa_step', 'mach', 'reynolds'):
+            if key in payload:
+                value = payload[key]
+                current[key] = None if value in (None, '') and key == 'reynolds' else float(value) if value is not None else None
+
+        current['aoa_step'] = max(0.25, min(10.0, float(current['aoa_step'])))
+        current['aoa_start'] = max(-30.0, min(30.0, float(current['aoa_start'])))
+        current['aoa_end'] = max(-30.0, min(30.0, float(current['aoa_end'])))
+        if current['aoa_end'] <= current['aoa_start']:
+            raise ValueError('AoA end must be greater than AoA start.')
+        point_count = int(round((current['aoa_end'] - current['aoa_start']) / current['aoa_step'])) + 1
+        if point_count > 121:
+            raise ValueError('AoA sweep is too dense. Keep total points at 121 or fewer.')
+
+        current['mach'] = max(0.01, min(0.6, float(current['mach'])))
+        if current['reynolds'] is not None:
+            current['reynolds'] = max(1_000.0, min(100_000_000.0, float(current['reynolds'])))
+
+        state.analysis.conditions = AnalysisConditions.model_validate(current)
+
+    def _set_active_solver(self, state: AppState, payload: dict[str, Any]) -> None:
+        solver = str(payload.get('solver') or '').strip().lower()
+        if solver not in ('openvsp', 'neuralfoil'):
+            raise ValueError('solver must be one of: openvsp, neuralfoil')
+        state.analysis.active_solver = solver
+
     def _explain_state(self, state: AppState) -> str:
         af = state.airfoil.summary
         wp = state.wing.params
@@ -180,10 +242,12 @@ class CommandEngine:
             ),
         ]
 
-        active = state.analysis.precision_result
+        active_solver, active = get_active_result(state.analysis)
         if active and active.metrics:
             m = active.metrics
             lines.append(f"{_TXT_LATEST_SOURCE}: {active.source_label}")
+            if active_solver:
+                lines.append(f"Active solver: {active_solver}")
             if active.fallback_reason:
                 lines.append(f"{_TXT_FALLBACK_REASON}: {active.fallback_reason}")
             lines.append(
@@ -270,6 +334,10 @@ class CommandEngine:
             'SetAirfoil': 'SetAirfoil',
             'SetWing': 'SetWing',
             'BuildWingMesh': 'BuildWingMesh',
+            'SetAnalysisConditions': 'SetAnalysisConditions',
+            'SetActiveSolver': 'SetActiveSolver',
+            'RunOpenVspAnalysis': 'RunOpenVspAnalysis',
+            'RunNeuralFoilAnalysis': 'RunNeuralFoilAnalysis',
             'RunPrecisionAnalysis': 'RunPrecisionAnalysis',
             'Explain': 'Explain',
             'Undo': 'Undo',

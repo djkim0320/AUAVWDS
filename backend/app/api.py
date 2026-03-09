@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from datetime import datetime, timezone
@@ -8,9 +9,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.models.state import AppState, CommandEnvelope
+from app.models.state import AppState, CommandEnvelope, get_active_result, get_solver_result
 from app.services.command_engine import CommandEngine
 from app.services.llm_chat import LLMChatOrchestrator
 from app.services.state_store import SaveManager, StateStore
@@ -66,6 +68,18 @@ def create_app(work_dir: Path) -> FastAPI:
     app = FastAPI(title="AUAVWDS Backend", version="0.2.0")
 
     work_dir.mkdir(parents=True, exist_ok=True)
+    if os.getenv('AUAV_ENABLE_WEB_BRIDGE') == '1':
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[
+                'http://127.0.0.1:5173',
+                'http://localhost:5173',
+            ],
+            allow_credentials=False,
+            allow_methods=['*'],
+            allow_headers=['*'],
+        )
+
     store = StateStore(work_dir)
     saves = SaveManager(work_dir)
     engine = CommandEngine(work_dir)
@@ -195,7 +209,7 @@ def create_app(work_dir: Path) -> FastAPI:
         suffix = out.suffix.lower()
 
         if suffix == ".vsp3":
-            precision = state.analysis.precision_result
+            precision = get_solver_result(state.analysis, 'openvsp')
             src = None
             if precision and precision.analysis_mode == 'openvsp':
                 maybe = precision.extra_data.get("vsp3_path")
@@ -305,7 +319,7 @@ def _build_export_path(work_dir: Path, requested_output: str | None, requested_f
 
 
 def summarize_state(state: AppState) -> dict[str, Any]:
-    active = state.analysis.precision_result
+    active_solver, active = get_active_result(state.analysis)
     active_metric = active.metrics.model_dump() if active and active.metrics else None
     active_curve = None
     active_curve_range = None
@@ -376,10 +390,16 @@ def summarize_state(state: AppState) -> dict[str, Any]:
     return {
         "airfoil": state.airfoil.summary.model_dump(),
         "wing": state.wing.params.model_dump(),
-        "analysis_mode": state.analysis.mode,
+        "analysis_conditions": state.analysis.conditions.model_dump(),
+        "active_solver": active_solver,
         "analysis_available": bool(active),
+        "available_results": {
+            "openvsp": state.analysis.results.openvsp is not None,
+            "neuralfoil": state.analysis.results.neuralfoil is not None,
+        },
         "active_source_label": active.source_label if active else None,
         "active_result_mode": active.analysis_mode if active else None,
+        "active_result_solver_id": active.extra_data.get("solver_id") if active else None,
         "active_fallback_reason": active.fallback_reason if active else None,
         "active_notes": active.notes if active else None,
         "active_solver_airfoil": active.extra_data.get("solver_airfoil") if active else None,

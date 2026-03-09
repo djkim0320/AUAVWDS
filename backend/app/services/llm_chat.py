@@ -53,8 +53,33 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False},
     },
     {
+        'name': 'SetAnalysisConditions',
+        'description': 'Set aerodynamic analysis conditions shared by all solvers.',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'aoa_start': {'type': 'number'},
+                'aoa_end': {'type': 'number'},
+                'aoa_step': {'type': 'number'},
+                'mach': {'type': 'number'},
+                'reynolds': {'type': 'number'},
+            },
+            'additionalProperties': False,
+        },
+    },
+    {
+        'name': 'RunOpenVspAnalysis',
+        'description': 'Run OpenVSP/VSPAERO wing analysis.',
+        'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False},
+    },
+    {
+        'name': 'RunNeuralFoilAnalysis',
+        'description': 'Run NeuralFoil-based wing estimate analysis.',
+        'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False},
+    },
+    {
         'name': 'RunPrecisionAnalysis',
-        'description': 'Run precision analysis (OpenVSP+VSPAERO mode).',
+        'description': 'Legacy alias for RunOpenVspAnalysis.',
         'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False},
     },
     {
@@ -486,8 +511,11 @@ class LLMChatOrchestrator:
             "When user intent is clear enough, proceed without unnecessary confirmation loops.\n"
             "Tool policy:\n"
             "- Geometry update flow: SetAirfoil -> SetWing -> BuildWingMesh.\n"
-            "- Aerodynamic analysis: RunPrecisionAnalysis.\n"
-            "- If an analysis already exists and airfoil/wing geometry is changed, run RunPrecisionAnalysis again after BuildWingMesh.\n"
+            "- SetAnalysisConditions when the user explicitly asks for AoA, Mach, or Reynolds changes.\n"
+            "- Use RunOpenVspAnalysis for higher-fidelity wing analysis.\n"
+            "- Use RunNeuralFoilAnalysis for fast airfoil-based wing estimate analysis.\n"
+            "- RunPrecisionAnalysis is a legacy alias for RunOpenVspAnalysis.\n"
+            "- If an analysis already exists and airfoil/wing geometry is changed, rebuild the mesh and rerun the most relevant analysis.\n"
             "- Explain for data-grounded interpretation of latest results.\n"
             "- Undo/Reset only when explicitly requested.\n"
             "- If user does not specify dihedral, prefer an initial dihedral around 5 deg unless user asks for straight wing.\n"
