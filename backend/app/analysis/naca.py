@@ -25,7 +25,7 @@ def _sanitize_naca_code(code: str) -> str:
     c = PRESET_TO_CODE.get(c, c)
     if len(c) == 4 and c.isdigit():
         return c
-    raise ValueError(f'Unsupported airfoil code: {code}')
+        raise ValueError(f'지원하지 않는 에어포일 코드입니다: {code}')
 
 
 def generate_naca4(code: str, n_points: int = 121) -> dict:
@@ -142,7 +142,7 @@ def generate_custom_airfoil(
         'lower': _round2(lower),
         'camber': _round2(camber),
         'summary': {
-            'code': 'Custom Airfoil',
+            'code': '커스텀 에어포일',
             'thickness_percent': round(t * 100.0, 3),
             'max_camber_percent': round(max_camber * 100.0, 3),
             'max_camber_x_percent': round(float(x[max_camber_idx]) * 100.0, 3),

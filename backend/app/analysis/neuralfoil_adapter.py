@@ -53,7 +53,7 @@ def run_neuralfoil_analysis(state: AppState, work_dir: str | Path, payload: dict
             summary=summary.model_dump(),
             conditions=conditions.model_dump(),
             run_dir=run_dir,
-            reason="Selected airfoil does not have enough coordinates for NeuralFoil analysis.",
+            reason="선택한 에어포일에 NeuralFoil 해석에 필요한 좌표가 충분하지 않습니다.",
         )
 
     input_payload = {
@@ -88,7 +88,7 @@ def run_neuralfoil_analysis(state: AppState, work_dir: str | Path, payload: dict
             summary=summary.model_dump(),
             conditions=conditions.model_dump(),
             run_dir=run_dir,
-            reason=f"NeuralFoil execution failed: {exc}",
+            reason=f"NeuralFoil 실행에 실패했습니다: {exc}",
         )
 
     raw_payload = _jsonify(raw)
@@ -105,7 +105,7 @@ def run_neuralfoil_analysis(state: AppState, work_dir: str | Path, payload: dict
             summary=summary.model_dump(),
             conditions=conditions.model_dump(),
             run_dir=run_dir,
-            reason=f"NeuralFoil returned an invalid payload: {exc}",
+            reason=f"NeuralFoil이 유효하지 않은 결과를 반환했습니다: {exc}",
         )
 
     if cl_2d.size != aoa.size or cd_2d.size != aoa.size or cm_2d.size != aoa.size:
@@ -115,7 +115,7 @@ def run_neuralfoil_analysis(state: AppState, work_dir: str | Path, payload: dict
             summary=summary.model_dump(),
             conditions=conditions.model_dump(),
             run_dir=run_dir,
-            reason="NeuralFoil returned a curve length that does not match the requested AoA sweep.",
+            reason="NeuralFoil 결과 곡선 길이가 요청한 AoA 범위와 일치하지 않습니다.",
         )
 
     corrected = _apply_wing_correction(
@@ -173,15 +173,15 @@ def run_neuralfoil_analysis(state: AppState, work_dir: str | Path, payload: dict
         "processed_result_path": str(run_dir / "processed_result.json"),
         "analysis_conditions": conditions.model_dump(),
         "solver_airfoil": {
-            "requested_label": str(summary.code or "").strip() or "Custom Airfoil",
+            "requested_label": str(summary.code or "").strip() or "커스텀 에어포일",
             "coordinate_count": len(coords),
-            "representation_label": "Airfoil coordinates",
+            "representation_label": "에어포일 좌표",
             "geometry_kind": "coordinates",
         },
         "result_level": "wing_estimate_from_2d_solver",
         "correction_model": "finite-wing-coupled-from-neuralfoil",
         "wing_correction_model": "finite-wing-coupled-from-neuralfoil",
-        "limitation_note": "Not a VLM/panel solver; derived from 2D airfoil analysis with explicit wing correction.",
+        "limitation_note": "VLM/패널 solver가 아니며, 2D 에어포일 해석 결과에 명시적 날개 보정을 적용한 추정 결과입니다.",
         "airfoil_representation": "coordinates",
         "raw_neuralfoil_output": raw_payload,
         "analysis_confidence": raw_payload.get("analysis_confidence"),
@@ -200,10 +200,7 @@ def run_neuralfoil_analysis(state: AppState, work_dir: str | Path, payload: dict
         analysis_mode="neuralfoil",
         fallback_reason=None,
         extra_data=extra_data,
-        notes=(
-            "NeuralFoil 2D polar was converted into a wing-level estimate with explicit finite-wing correction. "
-            "Use OpenVSP/VSPAERO for higher-fidelity wing solver results."
-        ),
+        notes="NeuralFoil 2D polar를 기반으로 유한 날개 보정을 적용한 추정 결과입니다. 더 높은 충실도의 날개 해석이 필요하면 OpenVSP/VSPAERO 결과를 확인해 주세요.",
     )
 
 
@@ -237,7 +234,7 @@ def _neuralfoil_fallback_result(
         "result_level": "wing_estimate_fallback",
         "correction_model": "finite-wing-coupled-from-neuralfoil",
         "wing_correction_model": "finite-wing-coupled-from-neuralfoil",
-        "limitation_note": "Not a VLM/panel solver; derived from 2D airfoil analysis with explicit wing correction.",
+        "limitation_note": "VLM/패널 solver가 아니며, 2D 에어포일 해석 결과에 명시적 날개 보정을 적용한 추정 결과입니다.",
         "precision_data": {
             "aoa_start": float(inputs.aoa_start),
             "aoa_end": float(inputs.aoa_end),
@@ -253,7 +250,7 @@ def _neuralfoil_fallback_result(
         analysis_mode="fallback",
         fallback_reason=reason,
         extra_data=extra_data,
-        notes=f"NeuralFoil fallback used: {reason}",
+        notes=f"NeuralFoil 경로가 대체 해석으로 전환되었습니다: {reason}",
     )
 
 

@@ -150,7 +150,7 @@ class LLMChatOrchestrator:
                 models = [x.get('id') for x in data.get('data', []) if x.get('id')]
                 return {'models': sorted(models), 'source_url': url, 'error': None}
 
-            return {'models': [], 'source_url': '', 'error': f'Unsupported provider: {provider}'}
+            return {'models': [], 'source_url': '', 'error': f'지원하지 않는 제공자입니다: {provider}'}
         except Exception as exc:
             return {'models': [], 'source_url': base_url, 'error': str(exc)}
 
@@ -202,7 +202,7 @@ class LLMChatOrchestrator:
                 tool_executor=tool_executor,
             )
 
-        raise ValueError(f'Unsupported provider: {provider}')
+        raise ValueError(f'지원하지 않는 제공자입니다: {provider}')
 
     def _run_gemini(
         self,
@@ -460,9 +460,9 @@ class LLMChatOrchestrator:
                 raise ValueError(payload.get('error', {}).get('message') or payload.get('detail') or text)
             return res.json()
         except requests.Timeout as exc:
-            raise ValueError('LLM chat failed: The read operation timed out') from exc
+            raise ValueError('LLM 채팅 요청이 시간 초과되었습니다.') from exc
         except requests.RequestException as exc:
-            raise ValueError(f'LLM chat failed: {exc}') from exc
+            raise ValueError(f'LLM 채팅 요청에 실패했습니다: {exc}') from exc
 
     def _to_gemini_contents(self, history: list[dict[str, str]]) -> list[dict[str, Any]]:
         contents = []

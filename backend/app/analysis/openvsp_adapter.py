@@ -82,7 +82,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                 params=params.model_dump(),
                 summary=summary.model_dump(),
                 run_dir=run_dir,
-                reason="OpenVSP solver binary not found. Expected vsp.exe in third_party/openvsp/win64 or AUAV_SOLVER_BIN_DIR.",
+                reason="OpenVSP solver 실행 파일을 찾을 수 없습니다. third_party/openvsp/win64 또는 AUAV_SOLVER_BIN_DIR에 vsp.exe가 필요합니다.",
                 conditions=conditions.model_dump(),
                 solver_extra={
                     "script_path": str(script_path),
@@ -117,7 +117,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                 params=params.model_dump(),
                 summary=summary.model_dump(),
                 run_dir=run_dir,
-                reason=f"OpenVSP solver returned non-zero exit code: {proc.returncode}",
+                reason=f"OpenVSP solver가 비정상 종료되었습니다. 종료 코드: {proc.returncode}",
                 conditions=conditions.model_dump(),
                 solver_extra={
                     "stdout_tail": _tail(stdout),
@@ -135,7 +135,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                 params=params.model_dump(),
                 summary=summary.model_dump(),
                 run_dir=run_dir,
-                reason="Solver ran but no aerodynamic table rows were parsed from stdout.",
+                reason="Solver는 실행되었지만 stdout에서 공력 테이블 행을 읽어오지 못했습니다.",
                 conditions=conditions.model_dump(),
                 solver_extra={
                     "stdout_tail": _tail(stdout),
@@ -212,7 +212,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             params=params.model_dump(),
             summary=summary.model_dump(),
             run_dir=run_dir,
-            reason="OpenVSP solver timed out.",
+            reason="OpenVSP solver 실행 시간이 초과되었습니다.",
             conditions=conditions.model_dump(),
             solver_extra={"solver_airfoil": _requested_airfoil_meta(state.airfoil)},
         )
@@ -222,7 +222,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             params=params.model_dump(),
             summary=summary.model_dump(),
             run_dir=run_dir,
-            reason=f"OpenVSP solver execution failed: {exc}",
+            reason=f"OpenVSP solver 실행에 실패했습니다: {exc}",
             conditions=conditions.model_dump(),
             solver_extra={"solver_airfoil": _requested_airfoil_meta(state.airfoil)},
         )
@@ -268,7 +268,7 @@ def _openvsp_fallback_result(
         analysis_mode="fallback",
         fallback_reason=reason,
         extra_data=extra_data,
-        notes=f"Precision solver fallback used: {reason}",
+        notes=f"OpenVSP/VSPAERO 경로가 대체 해석으로 전환되었습니다: {reason}",
     )
 
 
@@ -438,7 +438,7 @@ def _prepare_solver_airfoil(airfoil: AirfoilState, run_dir: Path) -> tuple[dict[
     coords = _solver_airfoil_coords(airfoil)
     if len(coords) < 6:
         requested.update({"geometry_kind": "unsupported"})
-        return requested, "Selected airfoil could not be represented for OpenVSP. No usable NACA code or coordinate set was available."
+        return requested, "선택한 에어포일을 OpenVSP 형상으로 표현할 수 없습니다. 사용 가능한 NACA 코드나 좌표 세트가 없습니다."
 
     airfoil_path = run_dir / "solver_airfoil.af"
     _write_airfoil_file(airfoil_path, requested["requested_label"], coords)
@@ -456,7 +456,7 @@ def _prepare_solver_airfoil(airfoil: AirfoilState, run_dir: Path) -> tuple[dict[
 def _requested_airfoil_meta(airfoil: AirfoilState) -> dict[str, Any]:
     coords = _solver_airfoil_coords(airfoil)
     return {
-        "requested_label": str(airfoil.summary.code or "").strip() or "Unnamed Airfoil",
+        "requested_label": str(airfoil.summary.code or "").strip() or "이름 없는 에어포일",
         "coordinate_count": len(coords),
     }
 
@@ -527,14 +527,14 @@ def _vsp_string(value: str) -> str:
 
 
 def _build_openvsp_notes(solver_airfoil: dict[str, Any]) -> str:
-    requested = str(solver_airfoil.get("requested_label") or "selected airfoil")
+    requested = str(solver_airfoil.get("requested_label") or "선택한 에어포일")
     geometry_kind = str(solver_airfoil.get("geometry_kind") or "")
     if geometry_kind == "custom_file":
-        return f"OpenVSP/VSPAERO precision analysis completed using imported airfoil coordinates for {requested}."
+        return f"{requested}의 좌표 파일을 사용해 OpenVSP/VSPAERO 정밀 해석을 완료했습니다."
     degraded_note = solver_airfoil.get("degraded_note")
     if isinstance(degraded_note, str) and degraded_note.strip():
         return degraded_note
-    return f"OpenVSP/VSPAERO precision analysis completed using {requested}."
+    return f"{requested} 형상을 사용해 OpenVSP/VSPAERO 정밀 해석을 완료했습니다."
 
 
 def _parse_vspaero_table(stdout: str) -> dict[str, list[float]]:

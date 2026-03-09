@@ -122,12 +122,12 @@ class CommandEngine:
         if cmd_type == 'SetAirfoil':
             self._set_airfoil(state, payload)
             clear_solver_results(state.analysis)
-            return state, 'Airfoil updated.'
+            return state, '에어포일을 업데이트했습니다.'
 
         if cmd_type == 'SetWing':
             self._set_wing(state, payload)
             clear_solver_results(state.analysis)
-            return state, 'Wing parameters updated.'
+            return state, '날개 형상 파라미터를 업데이트했습니다.'
 
         if cmd_type == 'BuildWingMesh':
             if not state.airfoil.upper:
@@ -135,34 +135,34 @@ class CommandEngine:
             mesh, planform = build_wing_mesh(state.airfoil, state.wing.params)
             state.wing.preview_mesh = mesh
             state.wing.planform_2d = planform
-            return state, '3D wing mesh generated.'
+            return state, '날개 3D 메시를 생성했습니다.'
 
         if cmd_type == 'SetAnalysisConditions':
             self._set_analysis_conditions(state, payload)
-            return state, 'Analysis conditions updated.'
+            return state, '해석 조건을 업데이트했습니다.'
 
         if cmd_type == 'SetActiveSolver':
             self._set_active_solver(state, payload)
-            return state, 'Active solver changed.'
+            return state, '활성 solver를 변경했습니다.'
 
         if cmd_type == 'RunOpenVspAnalysis':
             if not state.airfoil.upper:
                 self._set_airfoil(state, {'code': '2412'})
             result = run_precision_analysis(state, self.work_dir, payload)
             set_solver_result(state.analysis, 'openvsp', result)
-            return state, 'OpenVSP/VSPAERO analysis completed.'
+            return state, 'OpenVSP/VSPAERO 해석을 완료했습니다.'
 
         if cmd_type == 'RunNeuralFoilAnalysis':
             if not state.airfoil.upper:
                 self._set_airfoil(state, {'code': '2412'})
             result = run_neuralfoil_analysis(state, self.work_dir, payload)
             set_solver_result(state.analysis, 'neuralfoil', result)
-            return state, 'NeuralFoil wing-estimate analysis completed.'
+            return state, 'NeuralFoil 기반 날개 추정 해석을 완료했습니다.'
 
         if cmd_type == 'RunPrecisionAnalysis':
             return self.execute(state, CommandEnvelope(type='RunOpenVspAnalysis', payload=payload))
 
-        raise ValueError(f'Unsupported command type: {cmd_type}')
+        raise ValueError(f'지원하지 않는 명령 타입입니다: {cmd_type}')
 
     def _set_airfoil(self, state: AppState, payload: dict[str, Any]) -> None:
         code = str(payload.get('code') or '').strip()
@@ -208,10 +208,10 @@ class CommandEngine:
         current['aoa_start'] = max(-30.0, min(30.0, float(current['aoa_start'])))
         current['aoa_end'] = max(-30.0, min(30.0, float(current['aoa_end'])))
         if current['aoa_end'] <= current['aoa_start']:
-            raise ValueError('AoA end must be greater than AoA start.')
+            raise ValueError('AoA 종료값은 시작값보다 커야 합니다.')
         point_count = int(round((current['aoa_end'] - current['aoa_start']) / current['aoa_step'])) + 1
         if point_count > 121:
-            raise ValueError('AoA sweep is too dense. Keep total points at 121 or fewer.')
+            raise ValueError('AoA 샘플 수가 너무 많습니다. 전체 포인트 수를 121개 이하로 유지해 주세요.')
 
         current['mach'] = max(0.01, min(0.6, float(current['mach'])))
         if current['reynolds'] is not None:
@@ -222,7 +222,7 @@ class CommandEngine:
     def _set_active_solver(self, state: AppState, payload: dict[str, Any]) -> None:
         solver = str(payload.get('solver') or '').strip().lower()
         if solver not in ('openvsp', 'neuralfoil'):
-            raise ValueError('solver must be one of: openvsp, neuralfoil')
+            raise ValueError('solver는 openvsp 또는 neuralfoil 중 하나여야 합니다.')
         state.analysis.active_solver = solver
 
     def _explain_state(self, state: AppState) -> str:
@@ -247,7 +247,7 @@ class CommandEngine:
             m = active.metrics
             lines.append(f"{_TXT_LATEST_SOURCE}: {active.source_label}")
             if active_solver:
-                lines.append(f"Active solver: {active_solver}")
+                lines.append(f"활성 solver: {active_solver}")
             if active.fallback_reason:
                 lines.append(f"{_TXT_FALLBACK_REASON}: {active.fallback_reason}")
             lines.append(
@@ -345,31 +345,31 @@ class CommandEngine:
         }
         ctype = alias.get(name)
         if not ctype:
-            raise ValueError(f'Unknown tool/command: {name}')
+            raise ValueError(f'알 수 없는 도구 또는 명령입니다: {name}')
         return CommandEngine.validate_command(CommandEnvelope(type=ctype, payload=args))
 
     @staticmethod
     def validate_command(command: CommandEnvelope) -> CommandEnvelope:
         payload = command.payload or {}
         if not isinstance(payload, dict):
-            raise ValueError('Command payload must be an object.')
+            raise ValueError('명령 payload는 객체여야 합니다.')
 
         allowed = _COMMAND_PAYLOAD_KEYS.get(command.type)
         if allowed is None:
-            raise ValueError(f'Unsupported command type: {command.type}')
+            raise ValueError(f'지원하지 않는 명령 타입입니다: {command.type}')
 
         unknown = sorted(set(payload) - allowed)
         if unknown:
-            raise ValueError(f'Unsupported payload keys for {command.type}: {", ".join(unknown)}')
+            raise ValueError(f'{command.type}에서 지원하지 않는 payload 키입니다: {", ".join(unknown)}')
 
         clean_payload = dict(payload)
         if command.type == 'SetAirfoil' and 'custom' in clean_payload:
             custom = clean_payload.get('custom')
             if not isinstance(custom, dict):
-                raise ValueError('SetAirfoil.custom must be an object.')
+                raise ValueError('SetAirfoil.custom 값은 객체여야 합니다.')
             custom_unknown = sorted(set(custom) - _CUSTOM_AIRFOIL_KEYS)
             if custom_unknown:
-                raise ValueError(f'Unsupported custom airfoil keys: {", ".join(custom_unknown)}')
+                raise ValueError(f'지원하지 않는 커스텀 에어포일 키입니다: {", ".join(custom_unknown)}')
             clean_payload['custom'] = dict(custom)
 
         return CommandEnvelope(type=command.type, payload=clean_payload)

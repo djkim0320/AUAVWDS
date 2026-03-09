@@ -43,7 +43,7 @@ class ApiHardeningTests(unittest.TestCase):
         )
 
         self.assertEqual(res.status_code, 400)
-        self.assertIn('Unsupported payload keys for RunPrecisionAnalysis', res.json()['detail'])
+        self.assertIn('RunPrecisionAnalysis에서 지원하지 않는 payload 키입니다', res.json()['detail'])
 
     def test_load_rejects_traversal_style_save_id(self) -> None:
         res = self.client.post('/saves/load', json={'save_id': '..\\outside'})
@@ -282,7 +282,7 @@ class PrecisionAnalysisTests(unittest.TestCase):
 
         self.assertEqual(fallback_result.analysis_mode, 'fallback')
         self.assertTrue(fallback_result.fallback_reason)
-        self.assertEqual(fallback_result.source_label, '정밀 해석(OpenVSP/VSPAERO, Fallback)')
+        self.assertEqual(fallback_result.source_label, '정밀 해석(OpenVSP/VSPAERO, 대체 경로)')
         self.assertEqual(fallback_result.extra_data['solver_id'], 'openvsp')
 
         self.assertEqual(real_result.analysis_mode, 'openvsp')

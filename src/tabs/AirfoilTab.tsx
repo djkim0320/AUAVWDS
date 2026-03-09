@@ -119,7 +119,7 @@ export default function AirfoilTab({ airfoil, onApplyCustom, isApplying }: Props
 
   return (
     <div className="canvas-workspace airfoil-ui">
-      <div className="panel-title">Airfoil</div>
+      <div className="panel-title">에어포일</div>
 
       <div className="airfoil-controls">
         <Slider
@@ -177,19 +177,19 @@ export default function AirfoilTab({ airfoil, onApplyCustom, isApplying }: Props
 
       <div className="airfoil-metrics">
         <div>
-          <label>Profile</label>
-          <strong>{airfoil.summary.code || 'Custom Airfoil'}</strong>
+          <label>형상</label>
+          <strong>{airfoil.summary.code || '커스텀 에어포일'}</strong>
         </div>
         <div>
-          <label>Thickness</label>
+          <label>두께</label>
           <strong>{thickness.toFixed(2)}%</strong>
         </div>
         <div>
-          <label>Max Camber</label>
+          <label>최대 캠버</label>
           <strong>{camber.toFixed(2)}%</strong>
         </div>
         <div>
-          <label>Camber Position</label>
+          <label>캠버 위치</label>
           <strong>{camberPos.toFixed(1)}% c</strong>
         </div>
       </div>

@@ -14,7 +14,7 @@ function fmt(v?: number | null, d = 2): string {
 
 function fmtInt(v?: number | null): string {
   if (v === null || v === undefined || Number.isNaN(v)) return '-';
-  return Math.round(Number(v)).toLocaleString('en-US');
+  return Math.round(Number(v)).toLocaleString('ko-KR');
 }
 
 function toNumber(v: unknown): number | null {
@@ -63,7 +63,7 @@ const BASE_LABELS: Record<string, string> = {
   cmytot: '피치 모멘트계수 CMy',
   cmztot: '요 모멘트계수 CMz',
   analysis_confidence: '해석 신뢰도',
-  wall_time: '해석 시간 Wall Time',
+  wall_time: '해석 시간',
 };
 
 function humanizeVspaeroKey(key: string): string {
@@ -146,7 +146,7 @@ export default function AerodynamicsTab({
     return (
       <div className="canvas-workspace">
         <div className="panel-title-row">
-          <div className="panel-title">Aerodynamics</div>
+          <div className="panel-title">공력 해석</div>
           <div className="solver-runner">
             <button disabled={isRunningAnalysis} onClick={() => void onRunAnalysis('openvsp')}>OpenVSP 실행</button>
             <button disabled={isRunningAnalysis} onClick={() => void onRunAnalysis('neuralfoil')}>NeuralFoil 실행</button>
@@ -158,7 +158,7 @@ export default function AerodynamicsTab({
           onApply={onUpdateConditions}
           isUpdating={isUpdatingConditions}
         />
-        <div className="empty-state">아직 공력 데이터가 없어요. OpenVSP 또는 NeuralFoil 해석을 실행해 주세요.</div>
+        <div className="empty-state">아직 공력 데이터가 없습니다. OpenVSP 또는 NeuralFoil 해석을 실행해 주세요.</div>
       </div>
     );
   }
@@ -175,7 +175,7 @@ export default function AerodynamicsTab({
   const aoaPlotMin = Math.min(draft.aoa_start, Math.min(...aoa));
   const aoaPlotMax = Math.max(draft.aoa_end, Math.max(...aoa));
   const plotIndices = aoa
-    .map((a, idx) => ((a >= aoaPlotMin && a <= aoaPlotMax) ? idx : -1))
+    .map((a, idx) => (a >= aoaPlotMin && a <= aoaPlotMax ? idx : -1))
     .filter((idx) => idx >= 0);
   const aoaPlot = plotIndices.map((i) => aoa[i]);
   const clPlot = plotIndices.map((i) => c.cl[i]);
@@ -183,8 +183,8 @@ export default function AerodynamicsTab({
   const ldPlot = plotIndices.map((i) => clamp(ld[i], -200, 200));
 
   const chips = [
-    { k: 'CD min', v: fmt(m?.cd_min, 4) },
-    { k: '지구력 파라미터', v: fmt(m?.endurance_param, 1) },
+    { k: 'CD 최소', v: fmt(m?.cd_min, 4) },
+    { k: '체공 성능 지표', v: fmt(m?.endurance_param, 1) },
     { k: 'Oswald e', v: fmt(m?.oswald_e, 2) },
     { k: 'Re', v: fmtInt(m?.reynolds) },
   ];
@@ -245,7 +245,7 @@ export default function AerodynamicsTab({
 
       {result.analysis_mode === 'fallback' && (
         <div className="analysis-alert fallback">
-          선택한 solver 경로가 fallback으로 전환되었습니다.
+          선택한 solver 경로가 대체 해석으로 전환되었습니다.
           {result.fallback_reason ? ` 사유: ${result.fallback_reason}` : ''}
         </div>
       )}
@@ -253,19 +253,19 @@ export default function AerodynamicsTab({
       {provenance && (
         <div className="provenance-grid">
           <div className="provenance-card">
-            <div className="provenance-title">Solver provenance</div>
+            <div className="provenance-title">Solver 출처 정보</div>
             <div className="kv"><span>Solver</span><strong>{provenance.solverLabel}</strong></div>
             <div className="kv"><span>Solver ID</span><strong>{provenance.solverId}</strong></div>
-            <div className="kv"><span>Result level</span><strong>{provenance.resultLevel}</strong></div>
-            <div className="kv"><span>Correction</span><strong>{provenance.correctionModel}</strong></div>
-            <div className="kv"><span>Airfoil rep.</span><strong>{String(provenance.solverAirfoil?.representation_label || provenance.solverAirfoil?.geometry_kind || '-')}</strong></div>
+            <div className="kv"><span>결과 수준</span><strong>{provenance.resultLevel}</strong></div>
+            <div className="kv"><span>보정 모델</span><strong>{provenance.correctionModel}</strong></div>
+            <div className="kv"><span>에어포일 표현</span><strong>{String(provenance.solverAirfoil?.representation_label || provenance.solverAirfoil?.geometry_kind || '-')}</strong></div>
           </div>
           <div className="provenance-card">
-            <div className="provenance-title">Artifacts & notes</div>
+            <div className="provenance-title">산출물 및 메모</div>
             <div className="provenance-artifacts">
               {provenance.availableArtifacts.length > 0
                 ? provenance.availableArtifacts.map((item) => <span key={item} className="metric-chip">{item}</span>)
-                : <span className="muted">기록된 아티팩트 없음</span>}
+                : <span className="muted">기록된 산출물이 없습니다.</span>}
             </div>
             {provenance.limitationNote && <div className="solver-note provenance-note">{provenance.limitationNote}</div>}
           </div>
@@ -273,9 +273,9 @@ export default function AerodynamicsTab({
       )}
 
       <div className="aero-cards">
-        <Metric title="최대 양항비 (L/D)" value={fmt(m?.ld_max, 1)} desc="높을수록 효율적" emphasize />
-        <Metric title="최적 받음각" value={`${fmt(m?.ld_max_aoa, 1)}°`} desc="L/D 최대 지점" />
-        <Metric title="실속 각도" value={`${fmt(m?.cl_max_aoa, 1)}°`} desc="CL max 지점" />
+        <Metric title="최대 양항비 (L/D)" value={fmt(m?.ld_max, 1)} desc="높을수록 효율적입니다." emphasize />
+        <Metric title="최적 받음각" value={`${fmt(m?.ld_max_aoa, 1)}도`} desc="L/D가 최대인 지점" />
+        <Metric title="최대 양력 각도" value={`${fmt(m?.cl_max_aoa, 1)}도`} desc="CL이 최대인 지점" />
         <Metric title="최대 CL" value={fmt(m?.cl_max, 3)} desc="최대 양력계수" />
       </div>
 
@@ -294,20 +294,20 @@ export default function AerodynamicsTab({
       <div className="aero-detail-grid">
         <section className="detail-card">
           <h4>양력 특성</h4>
-          <div className="kv"><span>양력곡선 기울기 (CLα)</span><strong>{fmt(m?.cl_alpha, 2)} /rad</strong></div>
-          <div className="kv"><span>영양력 받음각 (α0)</span><strong>{fmt(m?.alpha_zero_lift, 2)}°</strong></div>
+          <div className="kv"><span>양력 곡선 기울기 (CL_alpha)</span><strong>{fmt(m?.cl_alpha, 2)} /rad</strong></div>
+          <div className="kv"><span>영양력 받음각</span><strong>{fmt(m?.alpha_zero_lift, 2)}도</strong></div>
         </section>
 
         <section className="detail-card">
           <h4>안정성 / 모멘트</h4>
-          <div className="kv"><span>Cm @ 영양력</span><strong>{fmt(m?.cm_zero_lift, 5)}</strong></div>
-          <div className="kv"><span>Cm 기울기 (Cmα)</span><strong>{fmt(m?.cm_alpha, 4)} /rad</strong></div>
+          <div className="kv"><span>영양력 조건 Cm</span><strong>{fmt(m?.cm_zero_lift, 5)}</strong></div>
+          <div className="kv"><span>Cm 기울기 (Cm_alpha)</span><strong>{fmt(m?.cm_alpha, 4)} /rad</strong></div>
         </section>
 
         <section className="detail-card">
           <h4>항력 특성</h4>
-          <div className="kv"><span>영항력 항력 (CD0)</span><strong>{fmt(m?.cd_zero, 4)}</strong></div>
-          <div className="kv"><span>유도항력 효율 (e)</span><strong>{fmt(m?.oswald_e, 3)}</strong></div>
+          <div className="kv"><span>영양력 항력 (CD0)</span><strong>{fmt(m?.cd_zero, 4)}</strong></div>
+          <div className="kv"><span>유도 항력 효율 (e)</span><strong>{fmt(m?.oswald_e, 3)}</strong></div>
         </section>
       </div>
 
@@ -352,14 +352,14 @@ function ConditionsEditor({
 }) {
   return (
     <div className="conditions-card">
-      <div className="provenance-title">Analysis conditions</div>
+      <div className="provenance-title">해석 조건</div>
       <div className="conditions-grid">
-        <NumberField label="AoA start" value={draft.aoa_start} step={0.5} onChange={(value) => onDraftChange({ ...draft, aoa_start: value })} />
-        <NumberField label="AoA end" value={draft.aoa_end} step={0.5} onChange={(value) => onDraftChange({ ...draft, aoa_end: value })} />
-        <NumberField label="AoA step" value={draft.aoa_step} step={0.25} onChange={(value) => onDraftChange({ ...draft, aoa_step: value })} />
-        <NumberField label="Mach" value={draft.mach} step={0.01} onChange={(value) => onDraftChange({ ...draft, mach: value })} />
+        <NumberField label="AoA 시작" value={draft.aoa_start} step={0.5} onChange={(value) => onDraftChange({ ...draft, aoa_start: value })} />
+        <NumberField label="AoA 종료" value={draft.aoa_end} step={0.5} onChange={(value) => onDraftChange({ ...draft, aoa_end: value })} />
+        <NumberField label="AoA 간격" value={draft.aoa_step} step={0.25} onChange={(value) => onDraftChange({ ...draft, aoa_step: value })} />
+        <NumberField label="마하수" value={draft.mach} step={0.01} onChange={(value) => onDraftChange({ ...draft, mach: value })} />
         <NumberField
-          label="Reynolds"
+          label="레이놀즈수"
           value={draft.reynolds ?? 0}
           step={10000}
           allowEmpty
@@ -368,7 +368,7 @@ function ConditionsEditor({
       </div>
       <div className="conditions-actions">
         <button disabled={isUpdating} onClick={() => void onApply(draft)}>
-          {isUpdating ? '조건 저장 중...' : '조건 적용'}
+          {isUpdating ? '조건 적용 중...' : '조건 적용'}
         </button>
       </div>
     </div>
@@ -434,7 +434,7 @@ function Chart({
     );
   }
 
-  const points = x.map((v, i) => [toNumber(v) ?? 0, toNumber(y[i]) ?? 0]);
+  const points = x.map((v, i) => [toNumber(v) ?? 0, toNumber(y[i]) ?? 0] as [number, number]);
   const finiteY = y.filter((v) => Number.isFinite(v));
   const minY = finiteY.length ? Math.min(...finiteY) : 0;
   const maxY = finiteY.length ? Math.max(...finiteY) : 1;
@@ -459,7 +459,7 @@ function Chart({
           grid: { left: 56, right: 20, top: 20, bottom: 44 },
           xAxis: {
             type: 'value',
-            name: '받음각 (°)',
+            name: '받음각(도)',
             min: xMin,
             max: xMax,
             splitNumber: 6,
@@ -490,10 +490,10 @@ function Chart({
             backgroundColor: '#132237',
             borderColor: '#2a4f78',
             textStyle: { color: '#dce8fb' },
-            formatter: (params: any) => {
+            formatter: (params: Array<{ data?: [number, number] }>) => {
               const p = params?.[0]?.data;
               if (!p) return '';
-              return `받음각: ${trimTrailingZeros(Number(p[0]).toFixed(1))}°<br/>${yName}: ${fmtAdaptive(Number(p[1]), axisSpan, 3, 6)}`;
+              return `받음각 ${trimTrailingZeros(Number(p[0]).toFixed(1))}도<br/>${yName}: ${fmtAdaptive(Number(p[1]), axisSpan, 3, 6)}`;
             },
           },
           series: [

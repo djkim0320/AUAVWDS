@@ -10,16 +10,18 @@ type Props = {
   isExporting: boolean;
 };
 
-const TXT_PREVIEW_RENDER = '\ud504\ub9ac\ubdf0 \ub80c\ub354\ub9c1';
-const TXT_EXPORT_LIMIT = 'VSP3 \ub0b4\ubcf4\ub0b4\uae30\ub294 \uc2e4\uc81c OpenVSP \uacb0\uacfc\uac00 \uc788\uc744 \ub54c\ub9cc \uc81c\uacf5\ud569\ub2c8\ub2e4.';
-const TXT_OPENVSP_LINKED = 'OpenVSP \uacb0\uacfc \uc5f0\ub3d9';
-const TXT_FALLBACK_RESULT = '\uadfc\uc0ac \ud574\uc11d \uacb0\uacfc';
-const TXT_NO_VSP3_FOR_FALLBACK = '\uc2e4\uc81c OpenVSP \uacb0\uacfc\uac00 \uc544\ub2c8\uc5b4\uc11c VSP3 \ub0b4\ubcf4\ub0b4\uae30\ub97c \uc0ac\uc6a9\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.';
-const TXT_OPENVSP_WITH_VSP3 = 'VSP3 \ud30c\uc77c\uc774 \ud3ec\ud568\ub41c \uc2e4\uc81c OpenVSP \uacb0\uacfc\uc785\ub2c8\ub2e4.';
-const TXT_OPENVSP_NO_VSP3 = '\uc2e4\uc81c OpenVSP \uacb0\uacfc\uc774\uc9c0\ub9cc VSP3 \ud30c\uc77c\uc744 \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.';
-const TXT_EXPORTING = '\ub0b4\ubcf4\ub0b4\ub294 \uc911...';
-const TXT_EXPORT = '\ub0b4\ubcf4\ub0b4\uae30';
-const TXT_EMPTY_WING = '\uc544\uc9c1 \ub0a0\uac1c 3D \ubaa8\ub378\uc774 \uc5c6\uc5b4\uc694. \ucc44\ud305\uc5d0\uc11c \uc124\uacc4\ub97c \uc694\uccad\ud574 \uc8fc\uc138\uc694.';
+const TXT_PREVIEW_RENDER = '프리뷰 렌더링';
+const TXT_EXPORT_LIMIT = 'VSP3 내보내기는 실제 OpenVSP 결과가 있을 때만 제공됩니다.';
+const TXT_OPENVSP_LINKED = 'OpenVSP 결과 연동';
+const TXT_NEURALFOIL_LINKED = 'NeuralFoil 결과 연동';
+const TXT_FALLBACK_RESULT = '대체 해석 결과';
+const TXT_NO_VSP3_FOR_FALLBACK = '실제 OpenVSP 결과가 아니어서 VSP3 내보내기를 사용할 수 없습니다.';
+const TXT_OPENVSP_WITH_VSP3 = 'VSP3 파일이 포함된 실제 OpenVSP 결과입니다.';
+const TXT_OPENVSP_NO_VSP3 = '실제 OpenVSP 결과이지만 VSP3 파일을 찾을 수 없습니다.';
+const TXT_NEURALFOIL_NOTE = 'NeuralFoil은 2D 에어포일 polar 기반의 날개 추정 결과를 제공합니다.';
+const TXT_EXPORTING = '내보내는 중...';
+const TXT_EXPORT = '내보내기';
+const TXT_EMPTY_WING = '아직 날개 3D 모델이 없습니다. 채팅에서 설계를 요청해 주세요.';
 
 export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -57,13 +59,14 @@ export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: 
         result.analysis_mode === 'openvsp'
           ? TXT_OPENVSP_LINKED
           : result.analysis_mode === 'neuralfoil'
-            ? 'NeuralFoil 연동'
+            ? TXT_NEURALFOIL_LINKED
             : TXT_FALLBACK_RESULT,
-      note: result.analysis_mode === 'fallback'
-        ? (result.fallback_reason || TXT_NO_VSP3_FOR_FALLBACK)
-        : result.analysis_mode === 'neuralfoil'
-          ? 'NeuralFoil은 2D airfoil polar 기반 날개 추정 결과를 제공합니다.'
-          : (hasVsp3 ? TXT_OPENVSP_WITH_VSP3 : TXT_OPENVSP_NO_VSP3),
+      note:
+        result.analysis_mode === 'fallback'
+          ? (result.fallback_reason || TXT_NO_VSP3_FOR_FALLBACK)
+          : result.analysis_mode === 'neuralfoil'
+            ? TXT_NEURALFOIL_NOTE
+            : (hasVsp3 ? TXT_OPENVSP_WITH_VSP3 : TXT_OPENVSP_NO_VSP3),
     };
   }, [analysis.active_solver, analysis.results]);
 
@@ -163,7 +166,7 @@ export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: 
   return (
     <div className="canvas-workspace wing-ui">
       <div className="panel-title-row">
-        <div className="panel-title">Wing 3D</div>
+        <div className="panel-title">날개 3D</div>
         <div className="wing-toolbar-actions">
           <div className="export-controls">
             <select
@@ -190,9 +193,9 @@ export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: 
       </div>
 
       <div className="wing-meta">
-        <span>Span: {wing.params.span_m.toFixed(2)}m</span>
-        <span>AR: {wing.params.aspect_ratio.toFixed(1)}</span>
-        <span>Sweep: {wing.params.sweep_deg.toFixed(1)}°</span>
+        <span>스팬: {wing.params.span_m.toFixed(2)}m</span>
+        <span>세장비: {wing.params.aspect_ratio.toFixed(1)}</span>
+        <span>스윕: {wing.params.sweep_deg.toFixed(1)}도</span>
       </div>
 
       <div className="three-host" ref={hostRef}>

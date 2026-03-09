@@ -560,12 +560,12 @@ export default function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">
-          AUAVWDS <span>Chat-first Wing Designer</span>
+          AUAVWDS <span>채팅 기반 날개 설계기</span>
         </div>
         <div className="tabs">
-          <button className={activeTab === 'airfoil' ? 'active' : ''} onClick={() => setActiveTab('airfoil')}>Airfoil</button>
-          <button className={activeTab === 'wing3d' ? 'active' : ''} onClick={() => setActiveTab('wing3d')}>Wing 3D</button>
-          <button className={activeTab === 'aero' ? 'active' : ''} onClick={() => setActiveTab('aero')}>Aerodynamics</button>
+          <button className={activeTab === 'airfoil' ? 'active' : ''} onClick={() => setActiveTab('airfoil')}>에어포일</button>
+          <button className={activeTab === 'wing3d' ? 'active' : ''} onClick={() => setActiveTab('wing3d')}>날개 3D</button>
+          <button className={activeTab === 'aero' ? 'active' : ''} onClick={() => setActiveTab('aero')}>공력</button>
         </div>
       </header>
 
@@ -601,8 +601,8 @@ export default function App() {
                 {'<'}
               </button>
               <div className="chat-head-text">
-                <div className="chat-title">Design Chat</div>
-                <div className="chat-sub">원하는 날개를 한 문장으로 말해줘</div>
+                <div className="chat-title">설계 채팅</div>
+                <div className="chat-sub">원하는 날개를 한 문장으로 설명해 주세요.</div>
               </div>
               <div className="chat-actions">
                 <button className="icon-btn" onClick={() => setShowSettingsModal(true)}>⚙</button>
@@ -611,7 +611,7 @@ export default function App() {
             </div>
 
             <div className="model-strip">
-              <div className="model-label">Model</div>
+              <div className="model-label">모델</div>
               <div className="model-select-row">
                 <button className="model-selector" onClick={() => setShowModelDrawer((v) => !v)}>
                   <span className="model-mark">{PROVIDER_META[activeModel.provider].mark}</span>
@@ -624,14 +624,14 @@ export default function App() {
             <div className="chat-list" ref={chatListRef}>
               {messages.map((m, idx) => (
                 <div key={idx} className={`msg ${m.role}`}>
-                  <div className="msg-role">{m.role.toUpperCase()}</div>
+                  <div className="msg-role">{m.role === 'user' ? '사용자' : '도우미'}</div>
                   <div className="msg-content">{m.content}</div>
                 </div>
               ))}
 
               {isBusy && (
                 <div className="msg assistant">
-                  <div className="msg-role">ASSISTANT</div>
+                  <div className="msg-role">도우미</div>
                   <div className="typing"><span></span><span></span><span></span></div>
                 </div>
               )}
@@ -803,7 +803,7 @@ export default function App() {
                   ))}
                 </select>
 
-                <button className="primary" onClick={() => void onCompareSaves()}>비교 버튼</button>
+                <button className="primary" onClick={() => void onCompareSaves()}>비교 실행</button>
                 {compareSummary && <div className="compare-summary in-drawer">{compareSummary}</div>}
               </div>
             )}
@@ -815,7 +815,7 @@ export default function App() {
         <div className="modal-overlay" onClick={() => setShowSettingsModal(false)}>
           <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
             <div className="settings-head">
-              <div className="settings-title">API Provider</div>
+              <div className="settings-title">API 제공자 설정</div>
               <button className="icon-btn" onClick={() => setShowSettingsModal(false)}>×</button>
             </div>
 
@@ -828,18 +828,18 @@ export default function App() {
                       사용하기
                     </button>
                   </div>
-                  <label>API Base URL</label>
+                  <label>API 기본 URL</label>
                   <input
                     value={providerConfigs[p].baseUrl}
                     onChange={(e) => updateProviderConfig(p, { baseUrl: e.target.value })}
                     placeholder={PROVIDER_META[p].defaultBase}
                   />
-                  <label>API Key</label>
+                  <label>API 키</label>
                   <input
                     type="password"
                     value={providerConfigs[p].apiKey}
                     onChange={(e) => updateProviderConfig(p, { apiKey: e.target.value })}
-                    placeholder="API Key 입력"
+                    placeholder="API 키 입력"
                   />
                 </div>
               ))}

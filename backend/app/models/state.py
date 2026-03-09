@@ -163,11 +163,11 @@ def clear_solver_results(analysis: AnalysisState) -> None:
 def source_label_for(solver_id: SolverId, analysis_mode: AnalysisMode) -> str:
     if solver_id == 'openvsp':
         if analysis_mode == 'fallback':
-            return '\uc815\ubc00 \ud574\uc11d(OpenVSP/VSPAERO, Fallback)'
+            return '\uc815\ubc00 \ud574\uc11d(OpenVSP/VSPAERO, \ub300\uccb4 \uacbd\ub85c)'
         return '\uc815\ubc00 \ud574\uc11d(OpenVSP/VSPAERO)'
 
     if analysis_mode == 'fallback':
-        return '\ube60\ub978 \ud574\uc11d(NeuralFoil \uae30\ubc18 \ub0a0\uac1c \ucd94\uc815, Fallback)'
+        return '\ube60\ub978 \ud574\uc11d(NeuralFoil \uae30\ubc18 \ub0a0\uac1c \ucd94\uc815, \ub300\uccb4 \uacbd\ub85c)'
     return '\ube60\ub978 \ud574\uc11d(NeuralFoil \uae30\ubc18 \ub0a0\uac1c \ucd94\uc815)'
 
 
