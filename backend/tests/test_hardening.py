@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -14,9 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.analysis.naca import generate_custom_airfoil, generate_naca4
+from app.analysis.openvsp_adapter import run_precision_analysis
 from app.api import _build_export_path, create_app
 from app.geometry.wing_builder import _mock_pressure, build_wing_mesh
-from app.models.state import AirfoilState, AirfoilSummary, WingParams
+from app.models.state import AirfoilState, AirfoilSummary, AppState, WingParams
 from app.services.state_store import SaveManager
 
 
@@ -74,7 +79,7 @@ class ApiHardeningTests(unittest.TestCase):
     def test_export_ignores_external_path_and_writes_inside_exports_dir(self) -> None:
         self._prepare_mesh()
 
-        res = self.client.post('/export/cfd', json={'output_path': '..\\outside.json'})
+        res = self.client.post('/export/cfd', json={'format': 'json', 'output_path': '..\\outside.obj'})
 
         self.assertEqual(res.status_code, 200)
         payload = res.json()
@@ -85,11 +90,183 @@ class ApiHardeningTests(unittest.TestCase):
         self.assertEqual(exported.suffix, '.json')
         self.assertTrue(exported.exists())
 
+    def test_chat_and_command_updates_are_not_lost_under_concurrency(self) -> None:
+        app = create_app(self.work_dir)
+        chat_started = threading.Event()
+        allow_chat_finish = threading.Event()
+        responses: dict[str, object] = {}
+
+        def fake_run_agent_turn(self, **kwargs):
+            chat_started.set()
+            if not allow_chat_finish.wait(timeout=2):
+                raise RuntimeError('chat test timed out')
+            kwargs['tool_executor']('SetAirfoil', {'code': '2412'})
+            return {'text': 'ok', 'applied_tools': [{'name': 'SetAirfoil', 'arguments': {'code': '2412'}}]}
+
+        with (
+            patch('app.services.llm_chat.LLMChatOrchestrator.run_agent_turn', new=fake_run_agent_turn),
+            TestClient(app) as chat_client,
+            TestClient(app) as cmd_client,
+            TestClient(app) as read_client,
+        ):
+            def run_chat() -> None:
+                responses['chat'] = chat_client.post(
+                    '/chat',
+                    json={
+                        'message': 'set airfoil',
+                        'history': [],
+                        'provider': 'openai',
+                        'model': 'gpt-5.2',
+                        'base_url': 'https://example.invalid/v1',
+                        'api_key': 'test-key',
+                    },
+                )
+
+            def run_command() -> None:
+                chat_started.wait(timeout=2)
+                responses['command'] = cmd_client.post(
+                    '/command',
+                    json={'command': {'type': 'SetWing', 'payload': {'span_m': 2.7, 'sweep_deg': 12}}},
+                )
+
+            chat_thread = threading.Thread(target=run_chat)
+            command_thread = threading.Thread(target=run_command)
+            chat_thread.start()
+            self.assertTrue(chat_started.wait(timeout=2))
+            command_thread.start()
+            time.sleep(0.1)
+            allow_chat_finish.set()
+            chat_thread.join(timeout=5)
+            command_thread.join(timeout=5)
+
+            self.assertFalse(chat_thread.is_alive())
+            self.assertFalse(command_thread.is_alive())
+
+            chat_res = responses.get('chat')
+            command_res = responses.get('command')
+            self.assertIsNotNone(chat_res)
+            self.assertIsNotNone(command_res)
+            self.assertEqual(chat_res.status_code, 200)
+            self.assertEqual(command_res.status_code, 200)
+
+            state = read_client.get('/state').json()
+
+        self.assertEqual(state['airfoil']['summary']['code'], 'NACA 2412')
+        self.assertAlmostEqual(state['wing']['params']['span_m'], 2.7)
+        self.assertAlmostEqual(state['wing']['params']['sweep_deg'], 12.0)
+
     def _prepare_mesh(self) -> None:
         set_airfoil = self.client.post('/command', json={'command': {'type': 'SetAirfoil', 'payload': {'code': '2412'}}})
         self.assertEqual(set_airfoil.status_code, 200)
         build_mesh = self.client.post('/command', json={'command': {'type': 'BuildWingMesh', 'payload': {}}})
         self.assertEqual(build_mesh.status_code, 200)
+
+
+class PrecisionAnalysisTests(unittest.TestCase):
+    def test_naca_airfoil_changes_generated_solver_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, patch(
+            'app.analysis.openvsp_adapter._resolve_solver_paths',
+            return_value={'bin_dir': None, 'vsp_exe': None, 'vspaero_exe': None},
+        ):
+            work_dir = Path(tmp_dir)
+            state_2412 = AppState(airfoil=AirfoilState.model_validate(generate_naca4('2412')))
+            state_0012 = AppState(airfoil=AirfoilState.model_validate(generate_naca4('0012')))
+
+            result_2412 = run_precision_analysis(state_2412, work_dir / 'naca2412')
+            result_0012 = run_precision_analysis(state_0012, work_dir / 'naca0012')
+
+            script_2412 = Path(result_2412.extra_data['script_path']).read_text(encoding='utf-8')
+            script_0012 = Path(result_0012.extra_data['script_path']).read_text(encoding='utf-8')
+
+        self.assertNotEqual(script_2412, script_0012)
+        self.assertIn('GetXSecParm( xsec0, "Camber" ), 0.020000', script_2412)
+        self.assertIn('GetXSecParm( xsec0, "Camber" ), 0.000000', script_0012)
+        self.assertEqual(result_2412.extra_data['solver_airfoil']['representation_label'], 'NACA 2412')
+        self.assertEqual(result_0012.extra_data['solver_airfoil']['representation_label'], 'NACA 0012')
+
+    def test_custom_airfoil_creates_solver_file_and_reports_fallback_reason(self) -> None:
+        payload = generate_custom_airfoil(
+            max_camber_percent=3.0,
+            max_camber_x_percent=35.0,
+            thickness_percent=11.0,
+            reflex_percent=0.5,
+        )
+        payload['summary']['code'] = 'Mission Custom Airfoil'
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch(
+            'app.analysis.openvsp_adapter._resolve_solver_paths',
+            return_value={'bin_dir': None, 'vsp_exe': None, 'vspaero_exe': None},
+        ):
+            result = run_precision_analysis(
+                AppState(airfoil=AirfoilState.model_validate(payload)),
+                Path(tmp_dir),
+            )
+
+            solver_airfoil = result.extra_data['solver_airfoil']
+            solver_file = Path(solver_airfoil['file_path'])
+            script = Path(result.extra_data['script_path']).read_text(encoding='utf-8')
+            solver_text = solver_file.read_text(encoding='utf-8')
+            solver_exists = solver_file.exists()
+
+        self.assertEqual(result.analysis_mode, 'fallback')
+        self.assertTrue(result.fallback_reason)
+        self.assertEqual(solver_airfoil['geometry_kind'], 'custom_file')
+        self.assertTrue(solver_exists)
+        self.assertIn('Mission Custom Airfoil', solver_text)
+        self.assertIn('XS_FILE_AIRFOIL', script)
+        self.assertIn(solver_file.name, script)
+
+    def test_real_solver_and_fallback_results_are_clearly_distinct(self) -> None:
+        state = AppState(airfoil=AirfoilState.model_validate(generate_naca4('2412')))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+
+            with patch(
+                'app.analysis.openvsp_adapter._resolve_solver_paths',
+                return_value={'bin_dir': None, 'vsp_exe': None, 'vspaero_exe': None},
+            ):
+                fallback_result = run_precision_analysis(state, work_dir / 'fallback')
+
+            solver_dir = work_dir / 'solver_bin'
+            solver_dir.mkdir(parents=True, exist_ok=True)
+            vsp_exe = solver_dir / 'vsp.exe'
+            vspaero_exe = solver_dir / 'vspaero.exe'
+            vsp_exe.write_text('', encoding='utf-8')
+            vspaero_exe.write_text('', encoding='utf-8')
+
+            stdout = '\n'.join(
+                [
+                    '1 0.0000 -2.0000 0.0800 0.0000 0.0000 -0.2000 0.0000 0.0000 0.0100 0.0000 0.0000 0.0000 -0.0200 0.8000',
+                    '1 0.0000 0.0000 0.0800 0.0000 0.0000 0.0000 0.0000 0.0000 0.0090 0.0000 0.0000 0.0000 -0.0100 0.8200',
+                    '1 0.0000 2.0000 0.0800 0.0000 0.0000 0.2000 0.0000 0.0000 0.0110 0.0000 0.0000 0.0000 0.0000 0.7800',
+                ]
+            )
+
+            def fake_subprocess_run(cmd, cwd, **kwargs):
+                Path(cwd, 'auav_case.vsp3').write_text('vsp3', encoding='utf-8')
+                return SimpleNamespace(returncode=0, stdout=stdout, stderr='')
+
+            with (
+                patch(
+                    'app.analysis.openvsp_adapter._resolve_solver_paths',
+                    return_value={'bin_dir': solver_dir, 'vsp_exe': vsp_exe, 'vspaero_exe': vspaero_exe},
+                ),
+                patch('app.analysis.openvsp_adapter.subprocess.run', side_effect=fake_subprocess_run),
+            ):
+                real_result = run_precision_analysis(state, work_dir / 'real')
+                vsp3_exists = Path(real_result.extra_data['vsp3_path']).exists()
+
+        self.assertEqual(fallback_result.analysis_mode, 'fallback')
+        self.assertTrue(fallback_result.fallback_reason)
+        self.assertEqual(fallback_result.source_label, '근사 해석(Fallback)')
+
+        self.assertEqual(real_result.analysis_mode, 'openvsp')
+        self.assertIsNone(real_result.fallback_reason)
+        self.assertEqual(real_result.source_label, '정밀 해석(OpenVSP/VSPAERO)')
+        self.assertNotEqual(real_result.source_label, fallback_result.source_label)
+        self.assertEqual(real_result.extra_data['solver_airfoil']['geometry_kind'], 'naca4')
+        self.assertTrue(vsp3_exists)
 
 
 class SaveManagerTests(unittest.TestCase):
@@ -147,6 +324,19 @@ class GeometryConsistencyTests(unittest.TestCase):
         expected_pressure = round(_mock_pressure(first_vertex[0], first_vertex[1], first_vertex[2], params.span_m), 6)
         self.assertEqual(mesh.pressure_overlay[0], expected_pressure)
 
+    def test_mesh_uses_single_shared_root_ring_without_centerline_cap(self) -> None:
+        airfoil = AirfoilState.model_validate(generate_naca4('2412'))
+        mesh, _ = build_wing_mesh(airfoil, WingParams())
+
+        root_indices = [idx for idx, vertex in enumerate(mesh.vertices) if abs(vertex[1]) < 1e-9]
+        expected_root_points = len(airfoil.upper) + len(airfoil.lower) - 1
+
+        self.assertEqual(len(root_indices), expected_root_points)
+        self.assertFalse(
+            any(all(abs(mesh.vertices[idx][1]) < 1e-9 for idx in tri) for tri in mesh.triangles),
+            'centerline root cap triangles should not exist',
+        )
+
 
 class ExportPathTests(unittest.TestCase):
     def test_build_export_path_stays_inside_exports_dir_for_all_supported_suffixes(self) -> None:
@@ -154,8 +344,16 @@ class ExportPathTests(unittest.TestCase):
             work_dir = Path(tmp_dir)
             export_dir = (work_dir / 'exports').resolve()
 
-            for requested, suffix in ((None, '.obj'), ('ignored.json', '.json'), ('C:\\temp\\ignored.vsp3', '.vsp3')):
-                target = _build_export_path(work_dir, requested).resolve()
+            cases = [
+                (None, None, '.obj'),
+                ('ignored.json', None, '.json'),
+                ('C:\\temp\\ignored.vsp3', None, '.vsp3'),
+                (None, 'json', '.json'),
+                ('ignored.obj', 'vsp3', '.vsp3'),
+            ]
+
+            for requested, requested_format, suffix in cases:
+                target = _build_export_path(work_dir, requested, requested_format).resolve()
                 self.assertTrue(target.is_relative_to(export_dir))
                 self.assertEqual(target.suffix, suffix)
 

@@ -25,6 +25,24 @@ function toNumber(v: unknown): number | null {
   return null;
 }
 
+function trimTrailingZeros(value: string): string {
+  return value.replace(/(\.\d*?[1-9])0+$/u, '$1').replace(/\.0+$/u, '').replace(/^-0$/u, '0');
+}
+
+function fmtAdaptive(value: number, span: number, floorDigits = 2, ceilingDigits = 5): string {
+  const abs = Math.abs(value);
+  const safeSpan = Math.max(Math.abs(span), abs, 1e-9);
+  let digits = floorDigits;
+  if (safeSpan < 0.01 || abs < 0.01) {
+    digits = Math.max(digits, 5);
+  } else if (safeSpan < 0.1 || abs < 0.1) {
+    digits = Math.max(digits, 4);
+  } else if (safeSpan < 1 || abs < 1) {
+    digits = Math.max(digits, 3);
+  }
+  return trimTrailingZeros(value.toFixed(Math.min(ceilingDigits, digits)));
+}
+
 const BASE_LABELS: Record<string, string> = {
   aoa: '받음각 AoA',
   mach: '마하수 Mach',
@@ -136,8 +154,15 @@ export default function AerodynamicsTab({ analysis }: { analysis: AnalysisState 
     <div className="canvas-workspace aero-ui">
       <div className="panel-title-row">
         <div className="panel-title">공력 해석 결과</div>
-        <SourceBadge label={result.source_label} mode="precision" />
+        <SourceBadge label={result.source_label} mode={result.analysis_mode} />
       </div>
+
+      {result.analysis_mode === 'fallback' && (
+        <div className="analysis-alert fallback">
+          실제 OpenVSP/VSPAERO 결과가 아니라 근사 해석 결과입니다.
+          {result.fallback_reason ? ` 사유: ${result.fallback_reason}` : ''}
+        </div>
+      )}
 
       <div className="aero-cards">
         <Metric title="최대 양항비 (L/D)" value={fmt(m?.ld_max, 1)} desc="높을수록 효율적" emphasize />
@@ -223,20 +248,16 @@ function Chart({ title, x, y, color, yName }: { title: string; x: number[]; y: n
   const finiteY = y.filter((v) => Number.isFinite(v));
   const minY = finiteY.length ? Math.min(...finiteY) : 0;
   const maxY = finiteY.length ? Math.max(...finiteY) : 1;
-  const pad = Math.max(0.01, (maxY - minY) * 0.1);
+  const rangeY = maxY - minY;
+  const pad = rangeY > 0 ? rangeY * 0.1 : Math.max(0.01, Math.abs(maxY || minY) * 0.15, 0.01);
 
-  let yMinAxis = Math.floor(minY - pad);
-  let yMaxAxis = Math.ceil(maxY + pad);
-  if (yName.includes('%')) {
-    yMinAxis = 0;
-    yMaxAxis = Math.max(120, Math.ceil(maxY + 5));
+  let yMinAxis = minY - pad;
+  let yMaxAxis = maxY + pad;
+  if (Math.abs(yMinAxis - yMaxAxis) < 1e-9) {
+    yMinAxis -= pad || 0.01;
+    yMaxAxis += pad || 0.01;
   }
-  if (yMinAxis === yMaxAxis) {
-    yMinAxis -= 1;
-    yMaxAxis += 1;
-  }
-
-  const yInterval = Math.max(1, Math.round((yMaxAxis - yMinAxis) / 6));
+  const axisSpan = yMaxAxis - yMinAxis;
 
   return (
     <div className="chart-card">
@@ -257,7 +278,7 @@ function Chart({ title, x, y, color, yName }: { title: string; x: number[]; y: n
             splitLine: { lineStyle: { color: '#162a42' } },
             axisLabel: {
               color: '#9cb0c8',
-              formatter: (value: number) => `${Math.round(value)}`,
+              formatter: (value: number) => fmtAdaptive(Number(value), axisSpan, 1, 5),
             },
             nameTextStyle: { color: '#8ea3bc' },
           },
@@ -267,12 +288,11 @@ function Chart({ title, x, y, color, yName }: { title: string; x: number[]; y: n
             min: yMinAxis,
             max: yMaxAxis,
             splitNumber: 6,
-            interval: yInterval,
             axisLine: { lineStyle: { color: '#28425f' } },
             splitLine: { lineStyle: { color: '#162a42' } },
             axisLabel: {
               color: '#9cb0c8',
-              formatter: (value: number) => `${Math.round(value)}`,
+              formatter: (value: number) => fmtAdaptive(Number(value), axisSpan, 2, 5),
             },
             nameTextStyle: { color: '#8ea3bc' },
           },
@@ -284,7 +304,7 @@ function Chart({ title, x, y, color, yName }: { title: string; x: number[]; y: n
             formatter: (params: any) => {
               const p = params?.[0]?.data;
               if (!p) return '';
-              return `받음각: ${Number(p[0]).toFixed(0)}°<br/>${yName}: ${Number(p[1]).toFixed(4)}`;
+              return `받음각: ${trimTrailingZeros(Number(p[0]).toFixed(1))}°<br/>${yName}: ${fmtAdaptive(Number(p[1]), axisSpan, 3, 6)}`;
             },
           },
           series: [

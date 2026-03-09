@@ -30,29 +30,35 @@ def build_wing_mesh(airfoil: AirfoilState, params: WingParams) -> tuple[WingMesh
     triangles: list[list[int]] = []
     pressure_overlay: list[float] = []
 
+    y_root = 0.0
+    x_root = 0.0
+    z_root = 0.0
+
+    root_ring = _section_ring(
+        profile=profile,
+        chord=c_root,
+        y=y_root,
+        x_offset=x_root,
+        z_offset=z_root,
+        twist=0.0,
+    )
+    _append_ring(vertices, pressure_overlay, root_ring, span)
+
+    root_start = 0
+    n = len(profile)
+
     for side in (-1.0, 1.0):
-        y_root = 0.0
         y_tip_mid = side * semi * tip_blend
         y_tip_end = side * semi
 
-        x_root = 0.0
         x_tip_mid = abs(y_tip_mid) * math.tan(sweep)
         x_tip_end = abs(y_tip_end) * math.tan(sweep)
 
-        z_root = 0.0
         z_tip_mid = abs(y_tip_mid) * math.tan(dihedral)
         z_tip_end = abs(y_tip_end) * math.tan(dihedral)
 
         twist_mid = twist_tip * tip_blend
 
-        root_ring = _section_ring(
-            profile=profile,
-            chord=c_root,
-            y=y_root,
-            x_offset=x_root,
-            z_offset=z_root,
-            twist=0.0,
-        )
         tip_mid_ring = _section_ring(
             profile=profile,
             chord=c_tip,
@@ -72,18 +78,14 @@ def build_wing_mesh(airfoil: AirfoilState, params: WingParams) -> tuple[WingMesh
         )
 
         base = len(vertices)
-        _append_ring(vertices, pressure_overlay, root_ring, span)
         _append_ring(vertices, pressure_overlay, tip_mid_ring, span)
         _append_ring(vertices, pressure_overlay, tip_end_ring, span)
 
-        n = len(profile)
-        root_start = base
-        mid_start = base + n
-        end_start = base + 2 * n
+        mid_start = base
+        end_start = base + n
         _append_strip(triangles, root_start, mid_start, n)
         _append_strip(triangles, mid_start, end_start, n)
 
-        _cap_ring(vertices, triangles, root_start, n, reverse=(side < 0), pressure_overlay=pressure_overlay)
         _cap_ring(vertices, triangles, end_start, n, reverse=(side > 0), pressure_overlay=pressure_overlay)
 
     _finalize_pressure_len(pressure_overlay, len(vertices))

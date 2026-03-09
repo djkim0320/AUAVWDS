@@ -5,6 +5,7 @@ import Wing3DTab from './tabs/Wing3DTab';
 import AerodynamicsTab from './tabs/AerodynamicsTab';
 import type {
   AppState,
+  ExportFormat,
   ProviderId,
   SaveSnapshotCompareResponse,
   SaveSnapshotRecord,
@@ -464,10 +465,10 @@ export default function App() {
     }
   }
 
-  async function onExportCfd() {
+  async function onExportCfd(format: ExportFormat) {
     setIsExporting(true);
     try {
-      const res = await bridge.exportCfd({});
+      const res = await bridge.exportCfd({ format });
       appendAssistantMessage(`CFD 모델을 내보냈어요. 경로: ${res.path}`);
     } catch (err: any) {
       appendAssistantMessage(`CFD 내보내기 실패: ${err?.message || String(err)}`);

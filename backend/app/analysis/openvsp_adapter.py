@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 
 from app.analysis.common import AeroInputs, build_surrogate_curve, derive_metrics
-from app.models.state import AeroCurve, AnalysisResult, AppState
+from app.models.state import AeroCurve, AirfoilState, AnalysisResult, AppState
 
 
 _NUM = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?"
@@ -20,6 +20,9 @@ _ROW_RE = re.compile(
     rf"({_NUM})\s+({_NUM})\s+({_NUM})\s+({_NUM})\s+({_NUM})\s+({_NUM})\s+"
     rf"({_NUM})\s+({_NUM})\s+({_NUM})\s+({_NUM})\s+({_NUM})"
 )
+_NACA4_RE = re.compile(r"(\d{4})")
+_SOURCE_LABEL_OPENVSP = "정밀 해석(OpenVSP/VSPAERO)"
+_SOURCE_LABEL_FALLBACK = "근사 해석(Fallback)"
 
 
 def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[str, Any] | None = None) -> AnalysisResult:
@@ -54,23 +57,38 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
 
     base_work = Path(work_dir).resolve()
     base_work.mkdir(parents=True, exist_ok=True)
-    run_dir = base_work / "precision_runs" / datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_dir = base_work / "precision_runs" / datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    solver = _resolve_solver_paths()
-    if solver["vsp_exe"] is None:
-        return _surrogate_precision_result(
-            inputs=inputs,
-            params=params.model_dump(),
-            summary=summary.model_dump(),
-            run_dir=run_dir,
-            reason="OpenVSP solver binary not found. Expected vsp.exe in third_party/openvsp/win64 or AUAV_SOLVER_BIN_DIR.",
-        )
-
     try:
-        case = _build_case_geometry(params.model_dump(), aoa_start, aoa_end, aoa_step, mach)
+        solver_airfoil, airfoil_error = _prepare_solver_airfoil(state.airfoil, run_dir)
+        if airfoil_error:
+            return _surrogate_precision_result(
+                inputs=inputs,
+                params=params.model_dump(),
+                summary=summary.model_dump(),
+                run_dir=run_dir,
+                reason=airfoil_error,
+                solver_extra={"solver_airfoil": solver_airfoil},
+            )
+
+        case = _build_case_geometry(params.model_dump(), solver_airfoil, aoa_start, aoa_end, aoa_step, mach)
         script_path = run_dir / "run_precision.vspscript"
         script_path.write_text(case["script"], encoding="utf-8")
+
+        solver = _resolve_solver_paths()
+        if solver["vsp_exe"] is None:
+            return _surrogate_precision_result(
+                inputs=inputs,
+                params=params.model_dump(),
+                summary=summary.model_dump(),
+                run_dir=run_dir,
+                reason="OpenVSP solver binary not found. Expected vsp.exe in third_party/openvsp/win64 or AUAV_SOLVER_BIN_DIR.",
+                solver_extra={
+                    "script_path": str(script_path),
+                    "solver_airfoil": case["solver_airfoil"],
+                },
+            )
 
         cmd = [str(solver["vsp_exe"]), "-script", str(script_path)]
         env = os.environ.copy()
@@ -100,7 +118,13 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                 summary=summary.model_dump(),
                 run_dir=run_dir,
                 reason=f"OpenVSP solver returned non-zero exit code: {proc.returncode}",
-                solver_extra={"stdout_tail": _tail(stdout), "stderr_tail": _tail(stderr), "command": cmd},
+                solver_extra={
+                    "stdout_tail": _tail(stdout),
+                    "stderr_tail": _tail(stderr),
+                    "command": cmd,
+                    "script_path": str(script_path),
+                    "solver_airfoil": case["solver_airfoil"],
+                },
             )
 
         parsed = _parse_vspaero_table(stdout)
@@ -111,7 +135,12 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                 summary=summary.model_dump(),
                 run_dir=run_dir,
                 reason="Solver ran but no aerodynamic table rows were parsed from stdout.",
-                solver_extra={"stdout_tail": _tail(stdout), "command": cmd},
+                solver_extra={
+                    "stdout_tail": _tail(stdout),
+                    "command": cmd,
+                    "script_path": str(script_path),
+                    "solver_airfoil": case["solver_airfoil"],
+                },
             )
 
         raw_aoa = list(parsed["aoa"])
@@ -144,6 +173,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             "Sref": case["sref"],
             "Cref": case["cref"],
             "Bref": case["bref"],
+            "solver_airfoil": case["solver_airfoil"],
             "precision_data": precision_data,
             "vspaero_all_data": vspaero_all_data,
         }
@@ -153,11 +183,13 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             extra_data["vsp3_path"] = str(vsp3)
 
         return AnalysisResult(
-            source_label="정밀해석(OpenVSP+VSPAERO)",
+            source_label=_SOURCE_LABEL_OPENVSP,
             curve=curve,
             metrics=metrics,
+            analysis_mode="openvsp",
+            fallback_reason=None,
             extra_data=extra_data,
-            notes="OpenVSP script-based precision analysis completed.",
+            notes=_build_openvsp_notes(case["solver_airfoil"]),
         )
     except subprocess.TimeoutExpired:
         return _surrogate_precision_result(
@@ -166,6 +198,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             summary=summary.model_dump(),
             run_dir=run_dir,
             reason="OpenVSP solver timed out.",
+            solver_extra={"solver_airfoil": _requested_airfoil_meta(state.airfoil)},
         )
     except Exception as exc:
         return _surrogate_precision_result(
@@ -174,6 +207,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             summary=summary.model_dump(),
             run_dir=run_dir,
             reason=f"OpenVSP solver execution failed: {exc}",
+            solver_extra={"solver_airfoil": _requested_airfoil_meta(state.airfoil)},
         )
 
 
@@ -195,6 +229,7 @@ def _surrogate_precision_result(
     extra_data: dict[str, Any] = {
         "solver_mode": "surrogate-fallback",
         "reason": reason,
+        "fallback_reason": reason,
         "params": params,
         "airfoil_summary": summary,
         "run_dir": str(run_dir),
@@ -204,9 +239,11 @@ def _surrogate_precision_result(
         extra_data.update(solver_extra)
 
     return AnalysisResult(
-        source_label="정밀해석(OpenVSP+VSPAERO)",
+        source_label=_SOURCE_LABEL_FALLBACK,
         curve=curve,
         metrics=metrics,
+        analysis_mode="fallback",
+        fallback_reason=reason,
         extra_data=extra_data,
         notes=f"Precision solver fallback used: {reason}",
     )
@@ -234,7 +271,14 @@ def _resolve_solver_paths() -> dict[str, Path | None]:
     return {"bin_dir": None, "vsp_exe": None, "vspaero_exe": None}
 
 
-def _build_case_geometry(params: dict[str, Any], aoa_start: float, aoa_end: float, aoa_step: float, mach: float) -> dict[str, Any]:
+def _build_case_geometry(
+    params: dict[str, Any],
+    solver_airfoil: dict[str, Any],
+    aoa_start: float,
+    aoa_end: float,
+    aoa_step: float,
+    mach: float,
+) -> dict[str, Any]:
     span = float(params["span_m"])
     ar = float(params["aspect_ratio"])
     taper = float(params["taper_ratio"])
@@ -249,10 +293,13 @@ def _build_case_geometry(params: dict[str, Any], aoa_start: float, aoa_end: floa
     mac = (2.0 / 3.0) * c_root * ((1.0 + taper + taper * taper) / (1.0 + taper))
 
     alpha_npts = max(2, int(round((aoa_end - aoa_start) / max(0.25, aoa_step))) + 1)
+    airfoil_script = _build_airfoil_script(solver_airfoil)
 
     script = f"""void main()
 {{
     string wid = AddGeom( "WING", "" );
+    SetParmVal( wid, "Sym_Planar_Flag", "Sym", SYM_XZ );
+    SetParmVal( wid, "RotateAirfoilMatchDideralFlag", "WingGeom", 1.0 );
     SetParmVal( wid, "Span", "XSec_1", {semi:.6f} );
     SetParmVal( wid, "Root_Chord", "XSec_1", {c_root:.6f} );
     SetParmVal( wid, "Tip_Chord", "XSec_1", {c_tip:.6f} );
@@ -262,6 +309,7 @@ def _build_case_geometry(params: dict[str, Any], aoa_start: float, aoa_end: floa
     SetParmVal( wid, "Tess_W", "Shape", 45 );
     SetParmVal( wid, "SectTess_U", "XSec_1", 20 );
     Update();
+{airfoil_script}
 
     WriteVSPFile( "auav_case.vsp3", SET_ALL );
 
@@ -332,7 +380,138 @@ def _build_case_geometry(params: dict[str, Any], aoa_start: float, aoa_end: floa
 }}
 """
 
-    return {"script": script, "sref": area, "cref": mac, "bref": span}
+    return {
+        "script": script,
+        "sref": area,
+        "cref": mac,
+        "bref": span,
+        "solver_airfoil": solver_airfoil,
+    }
+
+
+def _prepare_solver_airfoil(airfoil: AirfoilState, run_dir: Path) -> tuple[dict[str, Any], str | None]:
+    requested = _requested_airfoil_meta(airfoil)
+    naca_code = _extract_naca4_code(requested["requested_label"])
+
+    if naca_code:
+        camber, camber_loc, thickness = _naca4_parameters(naca_code)
+        geometry_kind = "naca4"
+        degraded_note = None
+        if "approx" in requested["requested_label"].lower():
+            geometry_kind = "naca4_approx"
+            degraded_note = "UI와 동일한 근사 NACA 형상으로 OpenVSP 해석을 수행했습니다."
+        requested.update(
+            {
+                "representation_label": f"NACA {naca_code}",
+                "geometry_kind": geometry_kind,
+                "camber": camber,
+                "camber_loc": camber_loc,
+                "thickness": thickness,
+                "degraded_note": degraded_note,
+            }
+        )
+        return requested, None
+
+    coords = _solver_airfoil_coords(airfoil)
+    if len(coords) < 6:
+        requested.update({"geometry_kind": "unsupported"})
+        return requested, "Selected airfoil could not be represented for OpenVSP. No usable NACA code or coordinate set was available."
+
+    airfoil_path = run_dir / "solver_airfoil.af"
+    _write_airfoil_file(airfoil_path, requested["requested_label"], coords)
+    requested.update(
+        {
+            "representation_label": airfoil_path.name,
+            "geometry_kind": "custom_file",
+            "file_name": airfoil_path.name,
+            "file_path": str(airfoil_path),
+        }
+    )
+    return requested, None
+
+
+def _requested_airfoil_meta(airfoil: AirfoilState) -> dict[str, Any]:
+    coords = _solver_airfoil_coords(airfoil)
+    return {
+        "requested_label": str(airfoil.summary.code or "").strip() or "Unnamed Airfoil",
+        "coordinate_count": len(coords),
+    }
+
+
+def _solver_airfoil_coords(airfoil: AirfoilState) -> list[list[float]]:
+    if airfoil.coords:
+        return [[float(p[0]), float(p[1])] for p in airfoil.coords]
+    if airfoil.upper and airfoil.lower:
+        return [[float(p[0]), float(p[1])] for p in (airfoil.upper[::-1] + airfoil.lower[1:])]
+    return []
+
+
+def _extract_naca4_code(label: str) -> str | None:
+    match = _NACA4_RE.search(str(label or ""))
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _naca4_parameters(code: str) -> tuple[float, float, float]:
+    camber = int(code[0]) / 100.0
+    camber_loc = int(code[1]) / 10.0
+    thickness = int(code[2:]) / 100.0
+    if camber <= 0.0:
+        camber_loc = 0.4
+    return camber, camber_loc, thickness
+
+
+def _build_airfoil_script(solver_airfoil: dict[str, Any]) -> str:
+    geometry_kind = str(solver_airfoil.get("geometry_kind") or "")
+    if geometry_kind in {"naca4", "naca4_approx"}:
+        camber = float(solver_airfoil["camber"])
+        camber_loc = float(solver_airfoil["camber_loc"])
+        thickness = float(solver_airfoil["thickness"])
+        return f"""    string xsec_surf = GetXSecSurf( wid, 0 );
+    ChangeXSecShape( xsec_surf, 0, XS_FOUR_SERIES );
+    ChangeXSecShape( xsec_surf, 1, XS_FOUR_SERIES );
+    Update();
+    string xsec0 = GetXSec( xsec_surf, 0 );
+    string xsec1 = GetXSec( xsec_surf, 1 );
+    SetParmVal( GetXSecParm( xsec0, "Camber" ), {camber:.6f} );
+    SetParmVal( GetXSecParm( xsec0, "CamberLoc" ), {camber_loc:.6f} );
+    SetParmVal( GetXSecParm( xsec0, "ThickChord" ), {thickness:.6f} );
+    SetParmVal( GetXSecParm( xsec1, "Camber" ), {camber:.6f} );
+    SetParmVal( GetXSecParm( xsec1, "CamberLoc" ), {camber_loc:.6f} );
+    SetParmVal( GetXSecParm( xsec1, "ThickChord" ), {thickness:.6f} );
+    Update();"""
+
+    file_name = _vsp_string(str(solver_airfoil.get("file_name") or "solver_airfoil.af"))
+    return f"""    string xsec_surf = GetXSecSurf( wid, 0 );
+    ChangeXSecShape( xsec_surf, 0, XS_FILE_AIRFOIL );
+    string xsec0 = GetXSec( xsec_surf, 0 );
+    ReadFileAirfoil( xsec0, "{file_name}" );
+    ChangeXSecShape( xsec_surf, 1, XS_FILE_AIRFOIL );
+    string xsec1 = GetXSec( xsec_surf, 1 );
+    ReadFileAirfoil( xsec1, "{file_name}" );
+    Update();"""
+
+
+def _write_airfoil_file(path: Path, label: str, coords: list[list[float]]) -> None:
+    lines = [label or "AUAVWDS Airfoil"]
+    lines.extend(f"{float(x):.6f} {float(z):.6f}" for x, z in coords)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _vsp_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _build_openvsp_notes(solver_airfoil: dict[str, Any]) -> str:
+    requested = str(solver_airfoil.get("requested_label") or "selected airfoil")
+    geometry_kind = str(solver_airfoil.get("geometry_kind") or "")
+    if geometry_kind == "custom_file":
+        return f"OpenVSP/VSPAERO precision analysis completed using imported airfoil coordinates for {requested}."
+    degraded_note = solver_airfoil.get("degraded_note")
+    if isinstance(degraded_note, str) and degraded_note.strip():
+        return degraded_note
+    return f"OpenVSP/VSPAERO precision analysis completed using {requested}."
 
 
 def _parse_vspaero_table(stdout: str) -> dict[str, list[float]]:

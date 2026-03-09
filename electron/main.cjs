@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
+const net = require('node:net');
 const { spawn } = require('node:child_process');
 
 let mainWindow = null;
@@ -34,9 +35,27 @@ function userLogDir() {
 }
 
 function choosePort() {
-  const min = 18080;
-  const max = 18180;
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+
+    server.unref();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : null;
+      server.close((err) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        if (!port) {
+          reject(new Error('Failed to allocate a backend port'));
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
 }
 
 function backendCommand() {
@@ -90,7 +109,7 @@ async function waitForHealth(baseUrl, timeoutMs = 30000) {
 }
 
 async function startBackend() {
-  backendPort = choosePort();
+  backendPort = await choosePort();
   const baseUrl = `http://127.0.0.1:${backendPort}`;
 
   const { cmd, args, cwd } = backendCommand();

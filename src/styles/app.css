@@ -499,6 +499,12 @@ button:disabled {
   color: #9cf3ca;
 }
 
+.source-badge.fallback {
+  border-color: #9f6a22;
+  background: #3b250b;
+  color: #ffd394;
+}
+
 .airfoil-controls {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -593,6 +599,18 @@ button.ghost,
   gap: 8px;
 }
 
+.export-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.export-controls select,
+.export-controls button {
+  height: 34px;
+  padding: 0 10px;
+}
+
 .solver-pill {
   border-radius: 999px;
   border: 1px solid #2f567d;
@@ -606,6 +624,29 @@ button.ghost,
   border-color: #2d7a61;
   background: #103429;
   color: #9af2c8;
+}
+
+.solver-pill.warn {
+  border-color: #9f6a22;
+  background: #3b250b;
+  color: #ffd394;
+}
+
+.solver-note {
+  margin-bottom: 8px;
+  border: 1px solid #284766;
+  border-radius: 10px;
+  background: #0b1a31;
+  color: #a7bdd7;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
+
+.solver-note.fallback {
+  border-color: #9f6a22;
+  background: rgba(88, 55, 18, 0.4);
+  color: #ffd8a7;
 }
 
 .wing-meta {
@@ -733,6 +774,23 @@ button.ghost,
 .metric-chip strong {
   color: #dce8f9;
   margin-left: 3px;
+}
+
+.analysis-alert {
+  margin-bottom: 8px;
+  border: 1px solid #315a82;
+  border-radius: 10px;
+  background: rgba(18, 40, 66, 0.72);
+  color: #c9e0fa;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
+
+.analysis-alert.fallback {
+  border-color: #9f6a22;
+  background: rgba(88, 55, 18, 0.4);
+  color: #ffd8a7;
 }
 
 .chart-grid {

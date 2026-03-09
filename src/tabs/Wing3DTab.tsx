@@ -1,25 +1,63 @@
-﻿import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import type { AnalysisState, WingState } from '../types';
+import type { AnalysisState, ExportFormat, WingState } from '../types';
 
 type Props = {
   wing: WingState;
   analysis: AnalysisState;
-  onExportCfd: () => Promise<void>;
+  onExportCfd: (format: ExportFormat) => Promise<void>;
   isExporting: boolean;
 };
 
+const TXT_PREVIEW_RENDER = '\ud504\ub9ac\ubdf0 \ub80c\ub354\ub9c1';
+const TXT_EXPORT_LIMIT = 'VSP3 \ub0b4\ubcf4\ub0b4\uae30\ub294 \uc2e4\uc81c OpenVSP \uacb0\uacfc\uac00 \uc788\uc744 \ub54c\ub9cc \uc81c\uacf5\ud569\ub2c8\ub2e4.';
+const TXT_OPENVSP_LINKED = 'OpenVSP \uacb0\uacfc \uc5f0\ub3d9';
+const TXT_FALLBACK_RESULT = '\uadfc\uc0ac \ud574\uc11d \uacb0\uacfc';
+const TXT_NO_VSP3_FOR_FALLBACK = '\uc2e4\uc81c OpenVSP \uacb0\uacfc\uac00 \uc544\ub2c8\uc5b4\uc11c VSP3 \ub0b4\ubcf4\ub0b4\uae30\ub97c \uc0ac\uc6a9\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.';
+const TXT_OPENVSP_WITH_VSP3 = 'VSP3 \ud30c\uc77c\uc774 \ud3ec\ud568\ub41c \uc2e4\uc81c OpenVSP \uacb0\uacfc\uc785\ub2c8\ub2e4.';
+const TXT_OPENVSP_NO_VSP3 = '\uc2e4\uc81c OpenVSP \uacb0\uacfc\uc774\uc9c0\ub9cc VSP3 \ud30c\uc77c\uc744 \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.';
+const TXT_EXPORTING = '\ub0b4\ubcf4\ub0b4\ub294 \uc911...';
+const TXT_EXPORT = '\ub0b4\ubcf4\ub0b4\uae30';
+const TXT_EMPTY_WING = '\uc544\uc9c1 \ub0a0\uac1c 3D \ubaa8\ub378\uc774 \uc5c6\uc5b4\uc694. \ucc44\ud305\uc5d0\uc11c \uc124\uacc4\ub97c \uc694\uccad\ud574 \uc8fc\uc138\uc694.';
+
 export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('obj');
 
   const precisionMeta = useMemo(() => {
-    if (!analysis.precision_result) return null;
-    const extra = analysis.precision_result.extra_data as Record<string, unknown>;
+    if (!analysis.precision_result) {
+      return {
+        analysisMode: null,
+        linked: false,
+        canExportVsp3: false,
+        pillText: TXT_PREVIEW_RENDER,
+        note: TXT_EXPORT_LIMIT,
+      };
+    }
+
+    const result = analysis.precision_result;
+    const extra = result.extra_data as Record<string, unknown>;
     const solverMode = typeof extra?.solver_mode === 'string' ? extra.solver_mode : '';
-    const linked = solverMode === 'openvsp-script' || Boolean(extra?.vsp3_path);
-    return { linked };
+    const hasVsp3 = result.analysis_mode === 'openvsp' && typeof extra?.vsp3_path === 'string' && extra.vsp3_path.length > 0;
+    const linked = result.analysis_mode === 'openvsp' && (solverMode === 'openvsp-script' || hasVsp3);
+
+    return {
+      analysisMode: result.analysis_mode,
+      linked,
+      canExportVsp3: hasVsp3,
+      pillText: result.analysis_mode === 'openvsp' ? TXT_OPENVSP_LINKED : TXT_FALLBACK_RESULT,
+      note: result.analysis_mode === 'fallback'
+        ? (result.fallback_reason || TXT_NO_VSP3_FOR_FALLBACK)
+        : (hasVsp3 ? TXT_OPENVSP_WITH_VSP3 : TXT_OPENVSP_NO_VSP3),
+    };
   }, [analysis.precision_result]);
+
+  useEffect(() => {
+    if (exportFormat === 'vsp3' && !precisionMeta.canExportVsp3) {
+      setExportFormat('obj');
+    }
+  }, [exportFormat, precisionMeta.canExportVsp3]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -113,13 +151,28 @@ export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: 
       <div className="panel-title-row">
         <div className="panel-title">Wing 3D</div>
         <div className="wing-toolbar-actions">
-          <button className="ghost" disabled={isExporting} onClick={() => void onExportCfd()}>
-            {isExporting ? '내보내는 중...' : 'CFD 내보내기'}
-          </button>
-          <span className={`solver-pill ${precisionMeta?.linked ? 'ok' : ''}`}>
-            {precisionMeta?.linked ? 'OpenVSP 연동 렌더링' : '프리뷰 렌더링'}
+          <div className="export-controls">
+            <select
+              value={exportFormat}
+              disabled={isExporting}
+              onChange={(e) => setExportFormat(e.target.value as ExportFormat)}
+            >
+              <option value="obj">OBJ</option>
+              <option value="json">JSON</option>
+              {precisionMeta.canExportVsp3 && <option value="vsp3">VSP3</option>}
+            </select>
+            <button className="ghost" disabled={isExporting} onClick={() => void onExportCfd(exportFormat)}>
+              {isExporting ? TXT_EXPORTING : TXT_EXPORT}
+            </button>
+          </div>
+          <span className={`solver-pill ${precisionMeta.linked ? 'ok' : precisionMeta.analysisMode === 'fallback' ? 'warn' : ''}`}>
+            {precisionMeta.pillText}
           </span>
         </div>
+      </div>
+
+      <div className={`solver-note ${precisionMeta.analysisMode === 'fallback' ? 'fallback' : ''}`}>
+        {precisionMeta.note}
       </div>
 
       <div className="wing-meta">
@@ -129,7 +182,7 @@ export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: 
       </div>
 
       <div className="three-host" ref={hostRef}>
-        {!wing.preview_mesh && <div className="empty-state">아직 날개 3D 모델이 없어요. 채팅에서 설계를 요청해 주세요.</div>}
+        {!wing.preview_mesh && <div className="empty-state">{TXT_EMPTY_WING}</div>}
         <div className="scale-overlay">
           <div className="scale-line"></div>
           <div className="scale-text">0.2m</div>

@@ -1,4 +1,6 @@
 export type ProviderId = 'openai' | 'anthropic' | 'gemini' | 'grok';
+export type AnalysisMode = 'openvsp' | 'fallback';
+export type ExportFormat = 'obj' | 'json' | 'vsp3';
 
 export interface AirfoilSummary {
   code: string;
@@ -70,6 +72,8 @@ export interface AnalysisResult {
   source_label: string;
   curve: AeroCurve;
   metrics: DerivedMetrics | null;
+  analysis_mode: AnalysisMode;
+  fallback_reason: string | null;
   extra_data: Record<string, unknown>;
   notes: string;
   created_at: string;

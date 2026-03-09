@@ -54,6 +54,7 @@ _TXT_ANALYSIS_AOA = '\ud574\uc11d \ubc1b\uc74c\uac01 \uc124\uc815'
 _TXT_INTERVAL = '\uac04\uaca9'
 _TXT_REYNOLDS = '\ud574\uc11d \ub808\uc774\ub180\uc988\uc218'
 _TXT_VSPAERO_SUMMARY = 'VSPAERO \uc694\uc57d'
+_TXT_FALLBACK_REASON = '\uadfc\uc0ac \uc0ac\uc720'
 _TXT_NO_ANALYSIS = (
     '\uc544\uc9c1 \uacf5\ub825 \ud574\uc11d \uacb0\uacfc\uac00 \uc5c6\uc2b5\ub2c8\ub2e4. '
     '\ucc44\ud305\uc5d0\uc11c \uc815\ubc00 \ud574\uc11d\uc744 \uc694\uccad\ud558\uba74 '
@@ -120,6 +121,8 @@ class CommandEngine:
             return state, '3D wing mesh generated.'
 
         if cmd_type == 'RunPrecisionAnalysis':
+            if not state.airfoil.upper:
+                self._set_airfoil(state, {'code': '2412'})
             result = run_precision_analysis(state, self.work_dir, payload)
             state.analysis.precision_result = result
             state.analysis.mode = 'precision'
@@ -181,6 +184,8 @@ class CommandEngine:
         if active and active.metrics:
             m = active.metrics
             lines.append(f"{_TXT_LATEST_SOURCE}: {active.source_label}")
+            if active.fallback_reason:
+                lines.append(f"{_TXT_FALLBACK_REASON}: {active.fallback_reason}")
             lines.append(
                 f"{_TXT_CORE_PERF}: "
                 f"\ucd5c\ub300 \uc591\ud56d\ube44(L/D) {m.ld_max:.2f} @ {_TXT_AOA} {m.ld_max_aoa:.1f}{_TXT_DEG}, "

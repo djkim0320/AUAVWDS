@@ -5,42 +5,23 @@ import re
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from app.models.state import AppState, default_app_state, migrate_legacy_state_payload
+
+_T = TypeVar('_T')
 
 
 class StateStore:
     def __init__(self, work_dir: Path):
         self._work_dir = work_dir
-        self._state_path = self._work_dir / 'state.json'
         self._lock = threading.RLock()
         self._state = default_app_state()
         self._work_dir.mkdir(parents=True, exist_ok=True)
-        # Runtime state is intentionally session-only.
-        # Persisted snapshots are handled by SaveManager.
-        try:
-            if self._state_path.exists():
-                self._state_path.unlink()
-        except Exception:
-            pass
-
-    def _load_if_exists(self) -> None:
-        if not self._state_path.exists():
-            return
-        try:
-            payload = json.loads(self._state_path.read_text(encoding='utf-8'))
-            payload = migrate_legacy_state_payload(payload if isinstance(payload, dict) else {})
-            self._state = AppState.model_validate(payload)
-        except Exception:
-            self._state = default_app_state()
-
-    def _persist(self) -> None:
-        self._state_path.write_text(self._state.model_dump_json(indent=2), encoding='utf-8')
 
     def get(self) -> AppState:
         with self._lock:
-            return AppState.model_validate(self._state.model_dump())
+            return self._clone_state(self._state)
 
     def set(self, state: AppState) -> None:
         with self._lock:
@@ -53,12 +34,26 @@ class StateStore:
             if not isinstance(next_state, AppState):
                 raise TypeError('mutate callback must return AppState')
             self._state = next_state
-            return AppState.model_validate(self._state.model_dump())
+            return self._clone_state(self._state)
+
+    def transact(self, fn: Callable[[AppState], tuple[AppState, _T]]) -> tuple[AppState, _T]:
+        with self._lock:
+            working = self._clone_state(self._state)
+            next_state, extra = fn(working)
+            if not isinstance(next_state, AppState):
+                raise TypeError('transaction callback must return (AppState, extra)')
+            self._state = next_state
+            return self._clone_state(self._state), extra
 
     def reset(self) -> AppState:
         with self._lock:
             self._state = default_app_state()
-            return self.get()
+            return self._clone_state(self._state)
+
+    @staticmethod
+    def _clone_state(state: AppState) -> AppState:
+        payload = migrate_legacy_state_payload(state.model_dump())
+        return AppState.model_validate(payload)
 
 
 class SaveManager:
@@ -91,7 +86,7 @@ class SaveManager:
         summary = {
             'airfoil': state.airfoil.summary.model_dump(),
             'wing': state.wing.params.model_dump(),
-            'mode': state.analysis.mode,
+            'mode': state.analysis.precision_result.analysis_mode if state.analysis.precision_result else state.analysis.mode,
         }
 
         payload = {
