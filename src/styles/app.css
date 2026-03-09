@@ -1133,10 +1133,12 @@ button.ghost,
 
 .settings-modal {
   width: min(860px, 96vw);
+  max-height: min(840px, calc(100vh - 48px));
   border: 1px solid #2a4a6a;
   border-radius: 14px;
   background: linear-gradient(180deg, #0a1931 0%, #071325 100%);
   box-shadow: 0 14px 45px rgba(0, 0, 0, 0.42);
+  overflow: auto;
 }
 
 .settings-head {
@@ -1246,5 +1248,163 @@ button.ghost,
   .history-drawer {
     width: min(460px, 92vw);
     min-width: 300px;
+  }
+}
+
+@media (max-width: 960px) {
+  .topbar {
+    height: auto;
+    padding: 10px 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .tabs {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .main-body {
+    flex-direction: column;
+  }
+
+  .chat-panel {
+    width: 100% !important;
+    min-width: 0;
+    max-width: none;
+    flex: 0 0 320px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .resize-handle {
+    display: none;
+  }
+
+  .chat-header {
+    grid-template-columns: 34px 1fr auto;
+  }
+
+  .chat-title {
+    font-size: 20px;
+  }
+
+  .model-select-row {
+    grid-template-columns: 1fr;
+  }
+
+  .list-open-btn {
+    width: 100%;
+  }
+
+  .canvas-panel {
+    padding: 8px;
+  }
+
+  .panel-title-row,
+  .solver-runner,
+  .solver-selector-row,
+  .conditions-actions {
+    flex-wrap: wrap;
+  }
+
+  .solver-runner {
+    justify-content: flex-start;
+  }
+
+  .conditions-grid,
+  .provenance-grid,
+  .provider-grid,
+  .aero-cards,
+  .airfoil-controls,
+  .airfoil-metrics,
+  .chart-grid,
+  .aero-detail-grid,
+  .vsp-extra-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .history-drawer {
+    width: min(100%, 560px);
+    min-width: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .brand {
+    width: 100%;
+  }
+
+  .tabs {
+    justify-content: flex-start;
+  }
+
+  .chat-panel {
+    flex-basis: 300px;
+  }
+
+  .settings-modal {
+    width: min(100vw - 20px, 680px);
+  }
+
+  .provider-grid,
+  .provenance-grid,
+  .conditions-grid,
+  .aero-cards,
+  .airfoil-controls,
+  .airfoil-metrics,
+  .chart-grid,
+  .aero-detail-grid,
+  .vsp-extra-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .history-tabs,
+  .history-actions-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 560px) {
+  .topbar {
+    padding: 8px 10px;
+  }
+
+  .tabs button,
+  .history-bar button,
+  .model-selector,
+  .list-open-btn {
+    width: 100%;
+  }
+
+  .chat-header {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      'title actions'
+      'collapse collapse';
+    gap: 8px;
+  }
+
+  .chat-header > .icon-btn:first-child {
+    grid-area: collapse;
+    justify-self: start;
+  }
+
+  .chat-head-text {
+    grid-area: title;
+  }
+
+  .chat-actions {
+    grid-area: actions;
+  }
+
+  .chat-input-row {
+    grid-template-columns: 1fr 44px;
+  }
+
+  .metric-chip {
+    width: 100%;
+    justify-content: space-between;
   }
 }

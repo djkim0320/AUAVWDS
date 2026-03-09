@@ -1,14 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_all
+
 block_cipher = None
+
+casadi_datas, casadi_binaries, casadi_hiddenimports = collect_all('casadi')
+neuralfoil_datas, neuralfoil_binaries, neuralfoil_hiddenimports = collect_all('neuralfoil')
 
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=['numpy', 'uvicorn', 'fastapi', 'pydantic', 'requests', 'neuralfoil'],
+    binaries=casadi_binaries + neuralfoil_binaries,
+    datas=casadi_datas + neuralfoil_datas,
+    hiddenimports=[
+        'numpy',
+        'uvicorn',
+        'fastapi',
+        'pydantic',
+        'requests',
+        'neuralfoil',
+        *casadi_hiddenimports,
+        *neuralfoil_hiddenimports,
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

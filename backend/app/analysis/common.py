@@ -108,7 +108,7 @@ def derive_metrics(curve: AeroCurve, reynolds: float, oswald: float) -> DerivedM
     cd = np.array(curve.cd, dtype=float)
     cm = np.array(curve.cm, dtype=float)
 
-    cd_safe = np.where(np.abs(cd) < 1e-9, np.nan, cd)
+    cd_safe = np.where(cd <= 1e-9, np.nan, cd)
     ld = cl / cd_safe
 
     finite = np.isfinite(ld)
@@ -118,6 +118,22 @@ def derive_metrics(curve: AeroCurve, reynolds: float, oswald: float) -> DerivedM
     else:
         ld_idx = int(np.nanargmax(ld))
         ld_max = float(ld[ld_idx])
+
+    cl_positive = np.where(cl > 1e-9, cl, np.nan)
+    endurance_scores = np.power(cl_positive, 1.5) / cd_safe
+    range_scores = np.sqrt(cl_positive) / cd_safe
+
+    endurance_finite = np.isfinite(endurance_scores)
+    if endurance_finite.any():
+        endurance_param = float(np.nanmax(endurance_scores))
+    else:
+        endurance_param = 0.0
+
+    range_finite = np.isfinite(range_scores)
+    if range_finite.any():
+        range_param = float(np.nanmax(range_scores))
+    else:
+        range_param = 0.0
 
     cl_idx = int(np.argmax(cl))
     cd_idx = int(np.argmin(cd))
@@ -149,8 +165,8 @@ def derive_metrics(curve: AeroCurve, reynolds: float, oswald: float) -> DerivedM
         cm_alpha=round(float(cm_slope), 6),
         cd_zero=round(cdo, 6),
         oswald_e=round(float(oswald), 6),
-        endurance_param=round(float(ld_max / max(1e-9, cdo)), 6),
-        range_param=round(float((ld_max**0.5) / max(1e-9, cdo)), 6),
+        endurance_param=round(endurance_param, 6),
+        range_param=round(range_param, 6),
         reynolds=round(float(reynolds), 2),
     )
 

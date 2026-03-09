@@ -647,7 +647,7 @@ export default function App() {
                     void sendMessage();
                   }
                 }}
-                placeholder="예: NACA 2412로 스팬 2m, AR 10, 스윕 15도 날개 만들고 폴라 보여줘"
+                placeholder="예: 스팬 2m급 날개를 설계하고, 원하는 형상과 공력 해석까지 도와줘"
               />
               <button disabled={!canSend} onClick={() => void sendMessage()}>
                 ➤

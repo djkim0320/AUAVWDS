@@ -17,12 +17,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.analysis.common import derive_metrics
 from app.analysis.naca import generate_custom_airfoil, generate_naca4
 from app.analysis.neuralfoil_adapter import run_neuralfoil_analysis
 from app.analysis.openvsp_adapter import run_precision_analysis
 from app.api import _build_export_path, create_app
 from app.geometry.wing_builder import _mock_pressure, build_wing_mesh
-from app.models.state import AirfoilState, AirfoilSummary, AppState, WingParams, get_active_result, set_solver_result
+from app.models.state import AeroCurve, AirfoilState, AirfoilSummary, AppState, WingParams, get_active_result, set_solver_result
 from app.services.state_store import SaveManager
 
 
@@ -293,6 +294,115 @@ class PrecisionAnalysisTests(unittest.TestCase):
         self.assertEqual(real_result.extra_data['solver_id'], 'openvsp')
         self.assertTrue(vsp3_exists)
 
+    def test_openvsp_prefers_filtered_polar_curve_when_stdout_rows_are_unstable(self) -> None:
+        state = AppState(airfoil=AirfoilState.model_validate(generate_naca4('2412')))
+        state.analysis.conditions.aoa_start = -2.0
+        state.analysis.conditions.aoa_end = 12.0
+        state.analysis.conditions.aoa_step = 2.0
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            solver_dir = work_dir / 'solver_bin'
+            solver_dir.mkdir(parents=True, exist_ok=True)
+            vsp_exe = solver_dir / 'vsp.exe'
+            vspaero_exe = solver_dir / 'vspaero.exe'
+            vsp_exe.write_text('', encoding='utf-8')
+            vspaero_exe.write_text('', encoding='utf-8')
+
+            stdout = '\n'.join(
+                [
+                    '3 0.08000 -2.00000 0.00000 0.00000 0.10000 0.10000 0.01000 -0.00900 0.00001 10000.00000 0.00000 0.00000 -0.01000 0.50000',
+                    '3 0.08000 0.00000 0.00000 0.00000 0.20000 0.20000 0.01000 -0.00800 0.00001 20000.00000 0.00000 0.00000 -0.02000 0.50000',
+                    '3 0.08000 2.00000 0.00000 0.00000 0.30000 0.30000 0.01000 -0.00700 0.00001 30000.00000 0.00000 0.00000 -0.03000 0.50000',
+                ]
+            )
+            polar = '\n'.join(
+                [
+                    'Beta Mach AoA Re/1e6 CLtot CDo CDi CDtot L/D E CMytot',
+                    '0.0 0.08 -2.0 10.0 0.080 0.0055 0.0010 0.0065 12.31 0.85 -0.020',
+                    '0.0 0.08 0.0 10.0 0.180 0.0056 0.0025 0.0081 22.22 0.88 -0.030',
+                    '0.0 0.08 2.0 10.0 0.330 0.0060 0.0039 0.0099 33.33 0.90 -0.045',
+                    '0.0 0.08 4.0 10.0 0.470 0.0070 0.0054 0.0124 37.90 0.91 -0.060',
+                    '0.0 0.08 6.0 10.0 0.610 0.0084 0.0070 0.0154 39.61 0.92 -0.075',
+                    '0.0 0.08 8.0 10.0 0.740 0.0102 0.0088 0.0190 38.95 0.93 -0.090',
+                    '0.0 0.08 10.0 10.0 0.840 0.0125 0.0105 0.0230 36.52 0.94 -0.105',
+                    '0.0 0.08 12.0 10.0 0.910 0.0149 -0.0035 0.0114 79.82 -2.10 -0.120',
+                ]
+            )
+
+            def fake_subprocess_run(cmd, cwd, **kwargs):
+                Path(cwd, 'auav_case.vsp3').write_text('vsp3', encoding='utf-8')
+                Path(cwd, 'auav_case.polar').write_text(polar, encoding='utf-8')
+                return SimpleNamespace(returncode=0, stdout=stdout, stderr='')
+
+            with (
+                patch(
+                    'app.analysis.openvsp_adapter._resolve_solver_paths',
+                    return_value={'bin_dir': solver_dir, 'vsp_exe': vsp_exe, 'vspaero_exe': vspaero_exe},
+                ),
+                patch('app.analysis.openvsp_adapter.subprocess.run', side_effect=fake_subprocess_run),
+            ):
+                result = run_precision_analysis(state, work_dir / 'real')
+
+        self.assertEqual(result.analysis_mode, 'openvsp')
+        self.assertEqual(result.extra_data['curve_source'], 'polar_filtered')
+        self.assertGreater(result.extra_data['curve_filtering']['dropped_row_count'], 0)
+        self.assertLess(result.metrics.ld_max, 100.0)
+        self.assertGreater(result.metrics.cd_min, 0.005)
+        self.assertEqual(result.curve.aoa_deg[-1], 10.0)
+        self.assertEqual(result.extra_data['requested_aoa_range'], {'start': -2.0, 'end': 12.0})
+        self.assertEqual(result.extra_data['valid_aoa_range'], {'start': -2.0, 'end': 10.0})
+        self.assertIn('요청한 해석 범위는 -2.0°~12.0°입니다.', result.notes)
+        self.assertIn('유효 구간만 결과에 반영했습니다.', result.notes)
+
+    def test_openvsp_normalizes_inverted_polar_sign_and_keeps_requested_range_metadata(self) -> None:
+        state = AppState(airfoil=AirfoilState.model_validate(generate_naca4('2412')))
+        state.analysis.conditions.aoa_start = -4.0
+        state.analysis.conditions.aoa_end = 4.0
+        state.analysis.conditions.aoa_step = 2.0
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            solver_dir = work_dir / 'solver_bin'
+            solver_dir.mkdir(parents=True, exist_ok=True)
+            vsp_exe = solver_dir / 'vsp.exe'
+            vspaero_exe = solver_dir / 'vspaero.exe'
+            vsp_exe.write_text('', encoding='utf-8')
+            vspaero_exe.write_text('', encoding='utf-8')
+
+            polar = '\n'.join(
+                [
+                    'Beta Mach AoA Re/1e6 CLtot CDo CDi CDtot L/D E CMytot',
+                    '0.0 0.08 -4.0 10.0 0.360 0.0060 0.0020 0.0080 45.00 0.87 0.040',
+                    '0.0 0.08 -2.0 10.0 0.190 0.0056 0.0014 0.0070 27.14 0.88 0.025',
+                    '0.0 0.08 0.0 10.0 0.010 0.0055 0.0010 0.0065 1.54 0.89 0.010',
+                    '0.0 0.08 2.0 10.0 -0.170 0.0058 0.0016 0.0074 -22.97 0.89 -0.015',
+                    '0.0 0.08 4.0 10.0 -0.340 0.0064 0.0024 0.0088 -38.64 0.88 -0.032',
+                ]
+            )
+
+            def fake_subprocess_run(cmd, cwd, **kwargs):
+                Path(cwd, 'auav_case.vsp3').write_text('vsp3', encoding='utf-8')
+                Path(cwd, 'auav_case.polar').write_text(polar, encoding='utf-8')
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+            with (
+                patch(
+                    'app.analysis.openvsp_adapter._resolve_solver_paths',
+                    return_value={'bin_dir': solver_dir, 'vsp_exe': vsp_exe, 'vspaero_exe': vspaero_exe},
+                ),
+                patch('app.analysis.openvsp_adapter.subprocess.run', side_effect=fake_subprocess_run),
+            ):
+                result = run_precision_analysis(state, work_dir / 'real')
+
+        self.assertEqual(result.analysis_mode, 'openvsp')
+        self.assertEqual(result.extra_data['requested_aoa_range'], {'start': -4.0, 'end': 4.0})
+        self.assertEqual(result.extra_data['valid_aoa_range'], {'start': -4.0, 'end': 4.0})
+        self.assertGreater(result.metrics.cl_alpha, 0.0)
+        self.assertLess(result.curve.cl[0], result.curve.cl[-1])
+        self.assertAlmostEqual(result.curve.cl[0], -0.36, places=2)
+        self.assertAlmostEqual(result.curve.cl[-1], 0.34, places=2)
+
 
 class NeuralFoilAnalysisTests(unittest.TestCase):
     def test_neuralfoil_analysis_produces_solver_specific_result(self) -> None:
@@ -417,6 +527,23 @@ class SaveManagerTests(unittest.TestCase):
                 left['summary']['airfoil']['shape_signature'],
                 right['summary']['airfoil']['shape_signature'],
             )
+
+
+class MetricFormulaTests(unittest.TestCase):
+    def test_endurance_and_range_params_use_positive_lift_efficiency_scores(self) -> None:
+        curve = AeroCurve(
+            aoa_deg=[-2.0, 0.0, 2.0, 4.0],
+            cl=[-0.1, 0.2, 0.6, 0.8],
+            cd=[0.020, 0.012, 0.018, 0.030],
+            cm=[0.0, -0.01, -0.02, -0.03],
+        )
+
+        metrics = derive_metrics(curve, reynolds=250000.0, oswald=0.82)
+
+        self.assertAlmostEqual(metrics.ld_max, round(0.6 / 0.018, 6))
+        self.assertAlmostEqual(metrics.endurance_param, round((0.6 ** 1.5) / 0.018, 6))
+        self.assertAlmostEqual(metrics.range_param, round((0.6 ** 0.5) / 0.018, 6))
+        self.assertLess(metrics.endurance_param, 100.0)
 
 
 class GeometryConsistencyTests(unittest.TestCase):

@@ -128,14 +128,21 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                 },
             )
 
-        parsed = _parse_vspaero_table(stdout)
-        if not parsed["aoa"]:
+        polar_path = run_dir / "auav_case.polar"
+        curve_payload = _load_openvsp_curve(
+            stdout,
+            polar_path=polar_path,
+            aoa_start=aoa_start,
+            aoa_end=aoa_end,
+            aoa_step=aoa_step,
+        )
+        if curve_payload is None:
             return _openvsp_fallback_result(
                 inputs=inputs,
                 params=params.model_dump(),
                 summary=summary.model_dump(),
                 run_dir=run_dir,
-                reason="Solver는 실행되었지만 stdout에서 공력 테이블 행을 읽어오지 못했습니다.",
+                reason="Solver는 실행되었지만 신뢰할 수 있는 공력 곡선을 읽어오지 못했습니다.",
                 conditions=conditions.model_dump(),
                 solver_extra={
                     "stdout_tail": _tail(stdout),
@@ -145,22 +152,21 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                 },
             )
 
-        raw_aoa = list(parsed["aoa"])
-        parsed = _resample_curve_to_unit_aoa(parsed, aoa_start=aoa_start, aoa_end=aoa_end, aoa_step=aoa_step)
-
         curve = AeroCurve(
-            aoa_deg=[round(x, 6) for x in parsed["aoa"]],
-            cl=[round(x, 6) for x in parsed["cl"]],
-            cd=[round(max(1e-6, x), 6) for x in parsed["cd"]],
-            cm=[round(x, 6) for x in parsed["cm"]],
+            aoa_deg=[round(x, 6) for x in curve_payload["curve"]["aoa"]],
+            cl=[round(x, 6) for x in curve_payload["curve"]["cl"]],
+            cd=[round(x, 6) for x in curve_payload["curve"]["cd"]],
+            cm=[round(x, 6) for x in curve_payload["curve"]["cm"]],
         )
+        raw_aoa_all = list(curve_payload["raw_aoa_all"])
 
         re_used = reynolds if (reynolds is not None and reynolds > 0) else _estimate_reynolds(case["cref"], mach)
         metrics = derive_metrics(curve, reynolds=re_used, oswald=_estimate_oswald(params.aspect_ratio, params.sweep_deg, params.taper_ratio))
         precision_data = _build_precision_data(
-            curve, metrics, case["sref"], case["cref"], case["bref"], raw_aoa=raw_aoa
+            curve, metrics, case["sref"], case["cref"], case["bref"], raw_aoa=raw_aoa_all
         )
-        vspaero_all_data = _build_vspaero_all_data(run_dir / "auav_case.polar")
+        vspaero_all_data = _build_vspaero_all_data_from_rows(curve_payload["summary_rows"])
+        vspaero_all_data_raw = _build_vspaero_all_data(polar_path)
         vsp3 = run_dir / "auav_case.vsp3"
 
         extra_data: dict[str, Any] = {
@@ -175,7 +181,11 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             "stderr_log": str(run_dir / "solver_stderr.log"),
             "run_dir": str(run_dir),
             "row_count": len(curve.aoa_deg),
-            "row_count_raw": len(raw_aoa),
+            "row_count_raw": len(raw_aoa_all),
+            "curve_source": curve_payload["source"],
+            "curve_filtering": curve_payload["filtering"],
+            "requested_aoa_range": curve_payload["filtering"].get("requested_aoa_range"),
+            "valid_aoa_range": curve_payload["filtering"].get("used_aoa_range"),
             "Sref": case["sref"],
             "Cref": case["cref"],
             "Bref": case["bref"],
@@ -184,11 +194,12 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             "solver_airfoil": case["solver_airfoil"],
             "precision_data": precision_data,
             "vspaero_all_data": vspaero_all_data,
+            "vspaero_all_data_raw": vspaero_all_data_raw,
             "available_artifacts": [
                 "run_precision.vspscript",
                 "solver_stdout.log",
                 "solver_stderr.log",
-                "auav_case.polar" if vspaero_all_data else None,
+                "auav_case.polar" if polar_path.exists() else None,
                 "auav_case.vsp3" if vsp3.exists() else None,
             ],
         }
@@ -204,7 +215,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             analysis_mode="openvsp",
             fallback_reason=None,
             extra_data=extra_data,
-            notes=_build_openvsp_notes(case["solver_airfoil"]),
+            notes=_build_openvsp_notes(case["solver_airfoil"], curve_filtering=curve_payload["filtering"]),
         )
     except subprocess.TimeoutExpired:
         return _openvsp_fallback_result(
@@ -526,56 +537,310 @@ def _vsp_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _build_openvsp_notes(solver_airfoil: dict[str, Any]) -> str:
+def _build_openvsp_notes(solver_airfoil: dict[str, Any], curve_filtering: dict[str, Any] | None = None) -> str:
     requested = str(solver_airfoil.get("requested_label") or "선택한 에어포일")
     geometry_kind = str(solver_airfoil.get("geometry_kind") or "")
+    filtering = curve_filtering or {}
+    dropped = int(filtering.get("dropped_row_count") or 0)
+    aoa_range = filtering.get("used_aoa_range")
+    requested_range = filtering.get("requested_aoa_range")
+
+    suffix = ""
+    if isinstance(requested_range, dict) and isinstance(aoa_range, dict):
+        requested_start = requested_range.get("start")
+        requested_end = requested_range.get("end")
+        start = aoa_range.get("start")
+        end = aoa_range.get("end")
+        if all(isinstance(v, (int, float)) for v in (requested_start, requested_end, start, end)):
+            suffix = (
+                f" 요청한 해석 범위는 {float(requested_start):.1f}°~{float(requested_end):.1f}°입니다."
+            )
+            if dropped > 0:
+                suffix += (
+                    f" 수렴이 불안정하거나 물리적으로 부적절한 받음각 {dropped}개 행은 제외하고 "
+                    f"{float(start):.1f}°~{float(end):.1f}° 유효 구간만 결과에 반영했습니다."
+                )
+            else:
+                suffix += f" 전체 요청 구간을 그대로 결과에 반영했습니다."
+
     if geometry_kind == "custom_file":
-        return f"{requested}의 좌표 파일을 사용해 OpenVSP/VSPAERO 정밀 해석을 완료했습니다."
+        return f"{requested}의 좌표 파일을 사용해 OpenVSP/VSPAERO 정밀 해석을 완료했습니다.{suffix}"
     degraded_note = solver_airfoil.get("degraded_note")
     if isinstance(degraded_note, str) and degraded_note.strip():
-        return degraded_note
-    return f"{requested} 형상을 사용해 OpenVSP/VSPAERO 정밀 해석을 완료했습니다."
+        return f"{degraded_note}{suffix}"
+    return f"{requested} 형상을 사용해 OpenVSP/VSPAERO 정밀 해석을 완료했습니다.{suffix}"
 
 
-def _parse_vspaero_table(stdout: str) -> dict[str, list[float]]:
-    rows_by_aoa: dict[float, tuple[int, float, float, float]] = {}
+def _load_openvsp_curve(
+    stdout: str,
+    *,
+    polar_path: Path,
+    aoa_start: float,
+    aoa_end: float,
+    aoa_step: float,
+) -> dict[str, Any] | None:
+    polar_parsed = _parse_polar_rows(polar_path)
+    if polar_parsed is not None:
+        headers, rows = polar_parsed
+        primary_rows = _extract_curve_rows_from_polar(headers, rows)
+        selected = _select_stable_curve_rows(primary_rows, aoa_step=aoa_step)
+        if selected is not None:
+            curve_rows, filter_meta = selected
+            filter_meta["requested_aoa_range"] = {"start": float(aoa_start), "end": float(aoa_end)}
+            curve = _curve_rows_to_curve_payload(curve_rows, aoa_start=aoa_start, aoa_end=aoa_end, aoa_step=aoa_step)
+            return {
+                "source": "polar_filtered" if filter_meta.get("dropped_row_count", 0) else "polar",
+                "curve": curve,
+                "raw_aoa": [float(row["aoa"]) for row in curve_rows],
+                "raw_aoa_all": [float(row["aoa"]) for row in primary_rows],
+                "summary_rows": curve_rows,
+                "filtering": filter_meta,
+            }
+
+    stdout_rows = _extract_curve_rows_from_stdout(stdout)
+    selected = _select_stable_curve_rows(stdout_rows, aoa_step=aoa_step)
+    if selected is None:
+        return None
+
+    curve_rows, filter_meta = selected
+    filter_meta["requested_aoa_range"] = {"start": float(aoa_start), "end": float(aoa_end)}
+    curve = _curve_rows_to_curve_payload(curve_rows, aoa_start=aoa_start, aoa_end=aoa_end, aoa_step=aoa_step)
+    return {
+        "source": "stdout_filtered" if filter_meta.get("dropped_row_count", 0) else "stdout",
+        "curve": curve,
+        "raw_aoa": [float(row["aoa"]) for row in curve_rows],
+        "raw_aoa_all": [float(row["aoa"]) for row in stdout_rows],
+        "summary_rows": curve_rows,
+        "filtering": filter_meta,
+    }
+
+
+def _extract_curve_rows_from_stdout(stdout: str) -> list[dict[str, float]]:
+    rows_by_aoa: dict[float, dict[str, float]] = {}
     for raw in stdout.splitlines():
         m = _ROW_RE.match(raw)
         if not m:
             continue
-        parts = m.groups()
-        iter_i = int(parts[0])
-        aoa = float(parts[2])
-        cl = float(parts[6])
-        cd = float(parts[9])
-        # VSPAERO table columns:
-        # ... E, CMxtot, CMytot, Cmztot, ...
-        # For aerodynamic pitching moment we use the Y-axis coefficient (CMytot).
-        cm = float(parts[13])
-        prev = rows_by_aoa.get(aoa)
-        if prev is None or iter_i >= prev[0]:
-            rows_by_aoa[aoa] = (iter_i, cl, cd, cm)
 
-    if not rows_by_aoa:
+        parts = m.groups()
+        row = {
+            "iter": float(int(parts[0])),
+            "mach": float(parts[1]),
+            "aoa": float(parts[2]),
+            "beta": float(parts[3]),
+            "cl": float(parts[6]),
+            "cdo": float(parts[7]),
+            "cdi": float(parts[8]),
+            "cd": float(parts[9]),
+            "ld": float(parts[10]),
+            "e": float(parts[11]),
+            "cm": float(parts[13]),
+        }
+
+        aoa = row["aoa"]
+        prev = rows_by_aoa.get(aoa)
+        if prev is None or row["iter"] >= prev["iter"]:
+            rows_by_aoa[aoa] = row
+
+    rows = [rows_by_aoa[aoa] for aoa in sorted(rows_by_aoa.keys())]
+    return _normalize_curve_row_sign(rows)
+
+
+def _extract_curve_rows_from_polar(headers: list[str], rows: list[dict[str, float]]) -> list[dict[str, float]]:
+    header_map = {_norm_header_key(h): h for h in headers}
+    aoa_key = header_map.get("aoa")
+    cl_key = header_map.get("cltot")
+    cd_key = header_map.get("cdtot")
+    cm_key = header_map.get("cmytot")
+
+    if not aoa_key or not cl_key or not cd_key or not cm_key:
+        return []
+
+    cdo_key = header_map.get("cdo")
+    cdi_key = header_map.get("cdi")
+    ld_key = header_map.get("l_d")
+    e_key = header_map.get("e")
+
+    curve_rows: list[dict[str, float]] = []
+    for row in rows:
+        curve_rows.append(
+            {
+                "aoa": float(row.get(aoa_key, float("nan"))),
+                "cl": float(row.get(cl_key, float("nan"))),
+                "cd": float(row.get(cd_key, float("nan"))),
+                "cm": float(row.get(cm_key, float("nan"))),
+                "cdo": float(row.get(cdo_key, float("nan"))) if cdo_key else float("nan"),
+                "cdi": float(row.get(cdi_key, float("nan"))) if cdi_key else float("nan"),
+                "ld": float(row.get(ld_key, float("nan"))) if ld_key else float("nan"),
+                "e": float(row.get(e_key, float("nan"))) if e_key else float("nan"),
+            }
+        )
+
+    return _normalize_curve_row_sign(curve_rows)
+
+
+def _normalize_curve_row_sign(rows: list[dict[str, float]]) -> list[dict[str, float]]:
+    if len(rows) < 3:
+        return rows
+
+    near_zero = [row for row in rows if abs(float(row["aoa"])) <= 2.5]
+    if len(near_zero) >= 2:
+        sample = near_zero
+    else:
+        idx = min(range(len(rows)), key=lambda i: abs(float(rows[i]["aoa"])))
+        sample = rows[max(0, idx - 1): min(len(rows), idx + 2)]
+
+    if len(sample) < 2:
+        return rows
+
+    first = sample[0]
+    last = sample[-1]
+    delta_aoa = float(last["aoa"]) - float(first["aoa"])
+    if abs(delta_aoa) < 1e-9:
+        return rows
+
+    slope = (float(last["cl"]) - float(first["cl"])) / delta_aoa
+    if slope >= 0:
+        return rows
+
+    for row in rows:
+        row["cl"] = -float(row["cl"])
+        row["cm"] = -float(row["cm"])
+        if math.isfinite(float(row.get("ld", float("nan")))):
+            row["ld"] = -float(row["ld"])
+    return rows
+
+
+def _select_stable_curve_rows(
+    rows: list[dict[str, float]],
+    *,
+    aoa_step: float,
+) -> tuple[list[dict[str, float]], dict[str, Any]] | None:
+    if not rows:
+        return None
+
+    valid_rows = [row for row in rows if _is_physically_plausible_curve_row(row)]
+    if len(valid_rows) < 3:
+        return None
+
+    segments: list[list[dict[str, float]]] = []
+    current: list[dict[str, float]] = []
+    max_gap = max(0.26, float(aoa_step) * 1.6)
+
+    for row in valid_rows:
+        if not current:
+            current = [row]
+            continue
+
+        prev = current[-1]
+        if abs(float(row["aoa"]) - float(prev["aoa"])) <= max_gap:
+            current.append(row)
+        else:
+            segments.append(current)
+            current = [row]
+
+    if current:
+        segments.append(current)
+
+    if not segments:
+        return None
+
+    segments.sort(
+        key=lambda segment: (
+            not any(abs(float(row["aoa"])) <= max(0.51, float(aoa_step)) for row in segment),
+            -len(segment),
+            abs(min(float(row["aoa"]) for row in segment)),
+        )
+    )
+    chosen = segments[0]
+    dropped_aoa = [float(row["aoa"]) for row in rows if row not in chosen]
+
+    return chosen, {
+        "raw_row_count": len(rows),
+        "valid_row_count": len(chosen),
+        "dropped_row_count": len(rows) - len(chosen),
+        "dropped_aoa": dropped_aoa,
+        "used_aoa_range": {
+            "start": float(chosen[0]["aoa"]),
+            "end": float(chosen[-1]["aoa"]),
+        },
+    }
+
+
+def _is_physically_plausible_curve_row(row: dict[str, float]) -> bool:
+    aoa = float(row.get("aoa", float("nan")))
+    cl = float(row.get("cl", float("nan")))
+    cd = float(row.get("cd", float("nan")))
+    cm = float(row.get("cm", float("nan")))
+    cdo = float(row.get("cdo", float("nan")))
+    cdi = float(row.get("cdi", float("nan")))
+    ld = float(row.get("ld", float("nan")))
+    e = float(row.get("e", float("nan")))
+
+    if not all(math.isfinite(v) for v in (aoa, cl, cd, cm)):
+        return False
+    if abs(cl) > 3.5:
+        return False
+    if abs(cm) > 2.5:
+        return False
+    if cd <= 1e-4:
+        return False
+    if cd > 1.5:
+        return False
+    if math.isfinite(cdo) and cdo > 0.5:
+        return False
+    if math.isfinite(cdo) and cdo < -1e-4:
+        return False
+    if math.isfinite(cdi) and cdi > 1.5:
+        return False
+    if math.isfinite(cdi) and cdi < -5e-4:
+        return False
+    if math.isfinite(e) and (e < -1e-6 or e > 2.5):
+        return False
+
+    ld_mag = abs(cl / cd) if not math.isfinite(ld) and cd > 0 else abs(ld)
+    if math.isfinite(ld_mag) and ld_mag > 120.0:
+        return False
+
+    return True
+
+
+def _curve_rows_to_curve_payload(
+    rows: list[dict[str, float]],
+    *,
+    aoa_start: float,
+    aoa_end: float,
+    aoa_step: float,
+) -> dict[str, list[float]]:
+    parsed = {
+        "aoa": [float(row["aoa"]) for row in rows],
+        "cl": [float(row["cl"]) for row in rows],
+        "cd": [float(row["cd"]) for row in rows],
+        "cm": [float(row["cm"]) for row in rows],
+    }
+
+    if len(rows) < 2:
+        return parsed
+
+    start = max(float(aoa_start), float(rows[0]["aoa"]))
+    end = min(float(aoa_end), float(rows[-1]["aoa"]))
+    if end - start < max(0.25, float(aoa_step)) * 0.5:
+        return parsed
+
+    return _resample_curve_to_unit_aoa(parsed, aoa_start=start, aoa_end=end, aoa_step=aoa_step)
+
+
+def _parse_vspaero_table(stdout: str) -> dict[str, list[float]]:
+    rows = _extract_curve_rows_from_stdout(stdout)
+    if not rows:
         return {"aoa": [], "cl": [], "cd": [], "cm": []}
 
-    aoa_sorted = sorted(rows_by_aoa.keys())
-    cl_vals = [rows_by_aoa[a][1] for a in aoa_sorted]
-    cd_vals = [max(1e-6, rows_by_aoa[a][2]) for a in aoa_sorted]
-    cm_vals = [rows_by_aoa[a][3] for a in aoa_sorted]
-
-    # Normalize sign convention: target positive CL slope around alpha=0.
-    if len(aoa_sorted) >= 3:
-        idx = min(range(len(aoa_sorted)), key=lambda i: abs(aoa_sorted[i]))
-        i0 = max(0, idx - 1)
-        i1 = min(len(aoa_sorted) - 1, idx + 1)
-        if i1 > i0:
-            slope = (cl_vals[i1] - cl_vals[i0]) / max(1e-9, (aoa_sorted[i1] - aoa_sorted[i0]))
-            if slope < 0:
-                cl_vals = [-x for x in cl_vals]
-                cm_vals = [-x for x in cm_vals]
-
-    return {"aoa": aoa_sorted, "cl": cl_vals, "cd": cd_vals, "cm": cm_vals}
+    return {
+        "aoa": [float(row["aoa"]) for row in rows],
+        "cl": [float(row["cl"]) for row in rows],
+        "cd": [float(max(1e-6, row["cd"])) for row in rows],
+        "cm": [float(row["cm"]) for row in rows],
+    }
 
 
 def _resample_curve_to_unit_aoa(
@@ -694,6 +959,38 @@ def _build_vspaero_all_data(polar_path: Path) -> dict[str, float]:
         return {}
 
     headers, rows = parsed
+    return _build_vspaero_all_data_from_headers_and_rows(headers, rows)
+
+
+def _build_vspaero_all_data_from_rows(rows: list[dict[str, float]]) -> dict[str, float]:
+    if not rows:
+        return {}
+
+    key_aliases = {
+        "AoA": "aoa",
+        "CLtot": "cltot",
+        "CDtot": "cdtot",
+        "CMytot": "cmytot",
+        "CDo": "cdo",
+        "CDi": "cdi",
+        "L/D": "l_d",
+        "E": "e",
+    }
+    normalized_rows: list[dict[str, float]] = []
+    for row in rows:
+        normalized_rows.append(
+            {
+                raw_key: float(row[src_key])
+                for raw_key, src_key in key_aliases.items()
+                if src_key in row and math.isfinite(float(row[src_key]))
+            }
+        )
+
+    headers = list(key_aliases.keys())
+    return _build_vspaero_all_data_from_headers_and_rows(headers, normalized_rows)
+
+
+def _build_vspaero_all_data_from_headers_and_rows(headers: list[str], rows: list[dict[str, float]]) -> dict[str, float]:
     if not rows:
         return {}
 

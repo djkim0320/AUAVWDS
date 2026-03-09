@@ -44,6 +44,13 @@ function fmtAdaptive(value: number, span: number, floorDigits = 2, ceilingDigits
   return trimTrailingZeros(value.toFixed(Math.min(ceilingDigits, digits)));
 }
 
+function fmtAoaRange(range?: Record<string, unknown> | null): string {
+  const start = toNumber(range?.start ?? range?.aoa_start);
+  const end = toNumber(range?.end ?? range?.aoa_end);
+  if (start === null || end === null) return '-';
+  return `${fmtAdaptive(start, Math.abs(end - start), 1, 4)}° ~ ${fmtAdaptive(end, Math.abs(end - start), 1, 4)}°`;
+}
+
 const BASE_LABELS: Record<string, string> = {
   aoa: '받음각 AoA',
   mach: '마하수 Mach',
@@ -112,6 +119,7 @@ export default function AerodynamicsTab({
 }: Props) {
   const { solver: resultSolver, result } = preferredResult(analysis);
   const [draft, setDraft] = useState<AnalysisConditions>(analysis.conditions);
+  const appliedConditions = analysis.conditions;
 
   useEffect(() => {
     setDraft(analysis.conditions);
@@ -139,8 +147,16 @@ export default function AerodynamicsTab({
       limitationNote: String(extra.limitation_note || ''),
       availableArtifacts,
       solverAirfoil: extra.solver_airfoil as Record<string, unknown> | undefined,
+      requestedAoaRange:
+        (extra.requested_aoa_range as Record<string, unknown> | undefined) ||
+        (extra.analysis_conditions as Record<string, unknown> | undefined) ||
+        (analysis.conditions as unknown as Record<string, unknown>),
+      validAoaRange:
+        (extra.valid_aoa_range as Record<string, unknown> | undefined) ||
+        ((extra.curve_filtering as Record<string, unknown> | undefined)?.used_aoa_range as Record<string, unknown> | undefined),
+      droppedRowCount: toNumber((extra.curve_filtering as Record<string, unknown> | undefined)?.dropped_row_count),
     };
-  }, [result, resultSolver]);
+  }, [analysis.conditions, result, resultSolver]);
 
   if (!result) {
     return (
@@ -154,6 +170,7 @@ export default function AerodynamicsTab({
         </div>
         <ConditionsEditor
           draft={draft}
+          applied={appliedConditions}
           onDraftChange={setDraft}
           onApply={onUpdateConditions}
           isUpdating={isUpdatingConditions}
@@ -172,8 +189,8 @@ export default function AerodynamicsTab({
     return clamp(v / cd, -200, 200);
   });
 
-  const aoaPlotMin = Math.min(draft.aoa_start, Math.min(...aoa));
-  const aoaPlotMax = Math.max(draft.aoa_end, Math.max(...aoa));
+  const aoaPlotMin = Math.min(appliedConditions.aoa_start, Math.min(...aoa));
+  const aoaPlotMax = Math.max(appliedConditions.aoa_end, Math.max(...aoa));
   const plotIndices = aoa
     .map((a, idx) => (a >= aoaPlotMin && a <= aoaPlotMax ? idx : -1))
     .filter((idx) => idx >= 0);
@@ -184,7 +201,7 @@ export default function AerodynamicsTab({
 
   const chips = [
     { k: 'CD 최소', v: fmt(m?.cd_min, 4) },
-    { k: '체공 성능 지표', v: fmt(m?.endurance_param, 1) },
+    { k: '체공 지표 (CL^(3/2)/CD)', v: fmt(m?.endurance_param, 1) },
     { k: 'Oswald e', v: fmt(m?.oswald_e, 2) },
     { k: 'Re', v: fmtInt(m?.reynolds) },
   ];
@@ -238,6 +255,7 @@ export default function AerodynamicsTab({
 
       <ConditionsEditor
         draft={draft}
+        applied={appliedConditions}
         onDraftChange={setDraft}
         onApply={onUpdateConditions}
         isUpdating={isUpdatingConditions}
@@ -259,6 +277,9 @@ export default function AerodynamicsTab({
             <div className="kv"><span>결과 수준</span><strong>{provenance.resultLevel}</strong></div>
             <div className="kv"><span>보정 모델</span><strong>{provenance.correctionModel}</strong></div>
             <div className="kv"><span>에어포일 표현</span><strong>{String(provenance.solverAirfoil?.representation_label || provenance.solverAirfoil?.geometry_kind || '-')}</strong></div>
+            <div className="kv"><span>요청 해석 범위</span><strong>{fmtAoaRange(provenance.requestedAoaRange)}</strong></div>
+            <div className="kv"><span>채택 유효 범위</span><strong>{fmtAoaRange(provenance.validAoaRange)}</strong></div>
+            <div className="kv"><span>제외된 행 수</span><strong>{fmtInt(provenance.droppedRowCount)}</strong></div>
           </div>
           <div className="provenance-card">
             <div className="provenance-title">산출물 및 메모</div>
@@ -341,11 +362,13 @@ function Metric({ title, value, desc, emphasize = false }: { title: string; valu
 
 function ConditionsEditor({
   draft,
+  applied,
   onDraftChange,
   onApply,
   isUpdating,
 }: {
   draft: AnalysisConditions;
+  applied: AnalysisConditions;
   onDraftChange: (conditions: AnalysisConditions) => void;
   onApply: (conditions: AnalysisConditions) => Promise<void>;
   isUpdating: boolean;
@@ -370,6 +393,16 @@ function ConditionsEditor({
         <button disabled={isUpdating} onClick={() => void onApply(draft)}>
           {isUpdating ? '조건 적용 중...' : '조건 적용'}
         </button>
+      </div>
+      <div className="solver-note">
+        현재 적용된 계산 범위: {fmtAdaptive(applied.aoa_start, Math.abs(applied.aoa_end - applied.aoa_start), 1, 4)}°
+        {' ~ '}
+        {fmtAdaptive(applied.aoa_end, Math.abs(applied.aoa_end - applied.aoa_start), 1, 4)}°
+        {' / 간격 '}
+        {fmtAdaptive(applied.aoa_step, applied.aoa_step, 2, 4)}°.
+      </div>
+      <div className="solver-note">
+        이 값은 그래프 축이 아니라 solver가 실제로 계산할 받음각 범위입니다. 변경 후 해석을 다시 실행해야 새 결과에 반영됩니다.
       </div>
     </div>
   );
