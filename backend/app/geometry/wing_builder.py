@@ -23,6 +23,7 @@ def build_wing_mesh(airfoil: AirfoilState, params: WingParams) -> tuple[WingMesh
     c_root = (2.0 * area) / (span * (1.0 + taper))
     c_tip = c_root * taper
     semi = span * 0.5
+    wingtip_style = str(params.wingtip_style or 'straight').lower()
     tip_blend = 0.88
     tip_end_chord = max(c_tip * 0.32, c_root * 0.06)
 
@@ -48,49 +49,67 @@ def build_wing_mesh(airfoil: AirfoilState, params: WingParams) -> tuple[WingMesh
     n = len(profile)
 
     for side in (-1.0, 1.0):
-        y_tip_mid = side * semi * tip_blend
-        y_tip_end = side * semi
+        if wingtip_style == 'pinched':
+            y_tip_mid = side * semi * tip_blend
+            y_tip_end = side * semi
 
-        x_tip_mid = abs(y_tip_mid) * math.tan(sweep)
-        x_tip_end = abs(y_tip_end) * math.tan(sweep)
+            x_tip_mid = abs(y_tip_mid) * math.tan(sweep)
+            x_tip_end = abs(y_tip_end) * math.tan(sweep)
 
-        z_tip_mid = abs(y_tip_mid) * math.tan(dihedral)
-        z_tip_end = abs(y_tip_end) * math.tan(dihedral)
+            z_tip_mid = abs(y_tip_mid) * math.tan(dihedral)
+            z_tip_end = abs(y_tip_end) * math.tan(dihedral)
 
-        twist_mid = twist_tip * tip_blend
+            twist_mid = twist_tip * tip_blend
 
-        tip_mid_ring = _section_ring(
-            profile=profile,
-            chord=c_tip,
-            y=y_tip_mid,
-            x_offset=x_tip_mid,
-            z_offset=z_tip_mid,
-            twist=twist_mid,
-        )
-        tip_end_ring = _section_ring(
-            profile=profile,
-            chord=tip_end_chord,
-            y=y_tip_end,
-            x_offset=x_tip_end,
-            z_offset=z_tip_end,
-            twist=twist_tip,
-            thickness_scale=0.55,
-        )
+            tip_mid_ring = _section_ring(
+                profile=profile,
+                chord=c_tip,
+                y=y_tip_mid,
+                x_offset=x_tip_mid,
+                z_offset=z_tip_mid,
+                twist=twist_mid,
+            )
+            tip_end_ring = _section_ring(
+                profile=profile,
+                chord=tip_end_chord,
+                y=y_tip_end,
+                x_offset=x_tip_end,
+                z_offset=z_tip_end,
+                twist=twist_tip,
+                thickness_scale=0.55,
+            )
 
-        base = len(vertices)
-        _append_ring(vertices, pressure_overlay, tip_mid_ring, span)
-        _append_ring(vertices, pressure_overlay, tip_end_ring, span)
+            base = len(vertices)
+            _append_ring(vertices, pressure_overlay, tip_mid_ring, span)
+            _append_ring(vertices, pressure_overlay, tip_end_ring, span)
 
-        mid_start = base
-        end_start = base + n
-        _append_strip(triangles, root_start, mid_start, n)
-        _append_strip(triangles, mid_start, end_start, n)
+            mid_start = base
+            end_start = base + n
+            _append_strip(triangles, root_start, mid_start, n)
+            _append_strip(triangles, mid_start, end_start, n)
+        else:
+            y_tip = side * semi
+            x_tip = abs(y_tip) * math.tan(sweep)
+            z_tip = abs(y_tip) * math.tan(dihedral)
+
+            tip_ring = _section_ring(
+                profile=profile,
+                chord=c_tip,
+                y=y_tip,
+                x_offset=x_tip,
+                z_offset=z_tip,
+                twist=twist_tip,
+            )
+
+            end_start = len(vertices)
+            _append_ring(vertices, pressure_overlay, tip_ring, span)
+            _append_strip(triangles, root_start, end_start, n)
 
         _cap_ring(vertices, triangles, end_start, n, reverse=(side > 0), pressure_overlay=pressure_overlay)
 
     _finalize_pressure_len(pressure_overlay, len(vertices))
 
-    planform = _build_planform(c_root, c_tip, semi, sweep)
+    planform = _build_planform(c_root, c_tip, semi, sweep, wingtip_style, tip_blend, tip_end_chord)
 
     return (
         WingMesh(
@@ -194,18 +213,45 @@ def _cap_ring(
             triangles.append([c_idx, a, b])
 
 
-def _build_planform(c_root: float, c_tip: float, semi: float, sweep: float) -> Planform2D:
+def _build_planform(
+    c_root: float,
+    c_tip: float,
+    semi: float,
+    sweep: float,
+    wingtip_style: str,
+    tip_blend: float,
+    tip_end_chord: float,
+) -> Planform2D:
     dx = abs(semi) * math.tan(sweep)
-    right_poly = [
-        [0.0, 0.0],
-        [c_root, 0.0],
-        [dx + c_tip, semi],
-        [dx, semi],
-    ]
-    left_poly = [[x, -y] for x, y in reversed(right_poly)]
+    if wingtip_style == 'pinched':
+        semi_mid = semi * tip_blend
+        dx_mid = abs(semi_mid) * math.tan(sweep)
+        right_poly = [
+            [0.0, 0.0],
+            [c_root, 0.0],
+            [dx_mid + c_tip, semi_mid],
+            [dx + tip_end_chord, semi],
+            [dx, semi],
+            [dx_mid, semi_mid],
+        ]
+        q_right = [
+            [0.25 * c_root, 0.0],
+            [dx_mid + 0.25 * c_tip, semi_mid],
+            [dx + 0.25 * tip_end_chord, semi],
+        ]
+    else:
+        right_poly = [
+            [0.0, 0.0],
+            [c_root, 0.0],
+            [dx + c_tip, semi],
+            [dx, semi],
+        ]
+        q_right = [[0.25 * c_root, 0.0], [dx + 0.25 * c_tip, semi]]
 
-    q_right = [[0.25 * c_root, 0.0], [dx + 0.25 * c_tip, semi]]
+    left_poly = [[x, -y] for x, y in reversed(right_poly)]
     q_left = [[0.25 * c_root, 0.0], [dx + 0.25 * c_tip, -semi]]
+    if wingtip_style == 'pinched':
+        q_left = [[x, -y] for x, y in reversed(q_right)]
 
     return Planform2D(
         polygon=[[round(x, 6), round(y, 6)] for x, y in right_poly + left_poly],

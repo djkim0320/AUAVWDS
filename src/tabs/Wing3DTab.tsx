@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import type { AnalysisState, ExportFormat, WingState } from '../types';
+import type { AnalysisState, ExportFormat, WingState, WingtipStyle } from '../types';
 
 type Props = {
   wing: WingState;
@@ -22,6 +22,10 @@ const TXT_NEURALFOIL_NOTE = 'NeuralFoil은 2D 에어포일 polar 기반의 날�
 const TXT_EXPORTING = '내보내는 중...';
 const TXT_EXPORT = '내보내기';
 const TXT_EMPTY_WING = '아직 날개 3D 모델이 없습니다. 채팅에서 설계를 요청해 주세요.';
+
+function wingtipStyleLabel(style: WingtipStyle): string {
+  return style === 'pinched' ? '조임형' : '직선형';
+}
 
 export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -196,6 +200,7 @@ export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: 
         <span>스팬: {wing.params.span_m.toFixed(2)}m</span>
         <span>세장비: {wing.params.aspect_ratio.toFixed(1)}</span>
         <span>스윕: {wing.params.sweep_deg.toFixed(1)}도</span>
+        <span>윙팁: {wingtipStyleLabel(wing.params.wingtip_style)}</span>
       </div>
 
       <div className="three-host" ref={hostRef}>

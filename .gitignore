@@ -1,9 +1,12 @@
 node_modules/
 dist/
 release/
+release-fixed/
+.playwright-cli/
 backend/build/
 backend/dist/
 backend/__pycache__/
+**/__pycache__/
 backend/**/*.pyc
 backend/.pytest_cache/
 tmp_asar_extract/

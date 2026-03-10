@@ -24,6 +24,7 @@ from app.analysis.openvsp_adapter import run_precision_analysis
 from app.api import _build_export_path, create_app
 from app.geometry.wing_builder import _mock_pressure, build_wing_mesh
 from app.models.state import AeroCurve, AirfoilState, AirfoilSummary, AppState, WingParams, get_active_result, set_solver_result
+from app.runtime.native import _reset_native_runtime_for_tests, prepare_native_runtime_dirs
 from app.services.state_store import SaveManager
 
 
@@ -113,6 +114,15 @@ class ApiHardeningTests(unittest.TestCase):
         res = self.client.post('/command', json={'command': {'type': 'SetActiveSolver', 'payload': {'solver': 'neuralfoil'}}})
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()['state']['analysis']['active_solver'], 'neuralfoil')
+
+    def test_set_wing_accepts_explicit_wingtip_style(self) -> None:
+        res = self.client.post(
+            '/command',
+            json={'command': {'type': 'SetWing', 'payload': {'span_m': 2.4, 'wingtip_style': 'pinched'}}},
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()['state']['wing']['params']['wingtip_style'], 'pinched')
 
     def test_chat_and_command_updates_are_not_lost_under_concurrency(self) -> None:
         app = create_app(self.work_dir)
@@ -405,6 +415,9 @@ class PrecisionAnalysisTests(unittest.TestCase):
 
 
 class NeuralFoilAnalysisTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_native_runtime_for_tests()
+
     def test_neuralfoil_analysis_produces_solver_specific_result(self) -> None:
         state = AppState(airfoil=AirfoilState.model_validate(generate_naca4('2412')))
 
@@ -468,6 +481,37 @@ class NeuralFoilAnalysisTests(unittest.TestCase):
         self.assertIsNotNone(state.analysis.results.neuralfoil)
         self.assertEqual(state.analysis.results.openvsp.extra_data['solver_id'], 'openvsp')
         self.assertEqual(state.analysis.results.neuralfoil.extra_data['solver_id'], 'neuralfoil')
+
+    def test_prepare_native_runtime_dirs_registers_casadi_bundle_paths_for_frozen_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_dir = Path(tmp_dir)
+            backend_exe = bundle_dir / 'backend.exe'
+            internal_dir = bundle_dir / '_internal'
+            casadi_dir = internal_dir / 'casadi'
+            backend_exe.write_text('', encoding='utf-8')
+            casadi_dir.mkdir(parents=True, exist_ok=True)
+
+            added: list[str] = []
+
+            def fake_add_dll_directory(path: str) -> SimpleNamespace:
+                added.append(path)
+                return SimpleNamespace(close=lambda: None)
+
+            _reset_native_runtime_for_tests()
+            with (
+                patch('app.runtime.native.os.add_dll_directory', side_effect=fake_add_dll_directory),
+                patch.object(sys, 'frozen', True, create=True),
+                patch.object(sys, '_MEIPASS', str(internal_dir), create=True),
+                patch.object(sys, 'executable', str(backend_exe)),
+            ):
+                prepared = prepare_native_runtime_dirs()
+
+        internal_path = str(internal_dir.resolve())
+        casadi_path = str(casadi_dir.resolve())
+        self.assertIn(internal_path, prepared)
+        self.assertIn(casadi_path, prepared)
+        self.assertIn(internal_path, added)
+        self.assertIn(casadi_path, added)
 
 
 class SaveManagerTests(unittest.TestCase):
@@ -574,6 +618,17 @@ class GeometryConsistencyTests(unittest.TestCase):
             any(all(abs(mesh.vertices[idx][1]) < 1e-9 for idx in tri) for tri in mesh.triangles),
             'centerline root cap triangles should not exist',
         )
+
+    def test_wingtip_style_changes_preview_topology(self) -> None:
+        airfoil = AirfoilState.model_validate(generate_naca4('2412'))
+
+        straight_mesh, straight_planform = build_wing_mesh(airfoil, WingParams(wingtip_style='straight'))
+        pinched_mesh, pinched_planform = build_wing_mesh(airfoil, WingParams(wingtip_style='pinched'))
+
+        self.assertLess(len(straight_mesh.vertices), len(pinched_mesh.vertices))
+        self.assertLess(len(straight_planform.polygon), len(pinched_planform.polygon))
+        self.assertEqual(straight_planform.polygon[2][1], 0.5)
+        self.assertEqual(pinched_planform.polygon[2][1], 0.44)
 
 
 class ExportPathTests(unittest.TestCase):

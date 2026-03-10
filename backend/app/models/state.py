@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 SolverId = Literal['openvsp', 'neuralfoil']
 AnalysisMode = Literal['openvsp', 'neuralfoil', 'fallback']
+WingtipStyle = Literal['straight', 'pinched']
 
 
 class AirfoilSummary(BaseModel):
@@ -33,6 +34,7 @@ class WingParams(BaseModel):
     taper_ratio: float = 1.0
     dihedral_deg: float = 5.0
     twist_deg: float = 0.0
+    wingtip_style: WingtipStyle = 'straight'
 
 
 class WingMesh(BaseModel):

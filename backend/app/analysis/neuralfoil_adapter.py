@@ -10,6 +10,7 @@ import numpy as np
 
 from app.analysis.common import AeroInputs, build_surrogate_curve, derive_metrics
 from app.models.state import AeroCurve, AnalysisResult, AppState, source_label_for
+from app.runtime.native import prepare_native_runtime_dirs
 
 
 def run_neuralfoil_analysis(state: AppState, work_dir: str | Path, payload: dict[str, Any] | None = None) -> AnalysisResult:
@@ -70,6 +71,7 @@ def run_neuralfoil_analysis(state: AppState, work_dir: str | Path, payload: dict
     mac = _mean_aerodynamic_chord(params.span_m, params.aspect_ratio, params.taper_ratio)
 
     try:
+        prepare_native_runtime_dirs()
         import neuralfoil  # type: ignore
 
         raw = neuralfoil.get_aero_from_coordinates(

@@ -23,7 +23,7 @@ from app.models.state import (
 
 _COMMAND_PAYLOAD_KEYS: dict[str, set[str]] = {
     'SetAirfoil': {'code', 'custom'},
-    'SetWing': {'span_m', 'aspect_ratio', 'sweep_deg', 'taper_ratio', 'dihedral_deg', 'twist_deg'},
+    'SetWing': {'span_m', 'aspect_ratio', 'sweep_deg', 'taper_ratio', 'dihedral_deg', 'twist_deg', 'wingtip_style'},
     'BuildWingMesh': set(),
     'SetAnalysisConditions': {'aoa_start', 'aoa_end', 'aoa_step', 'mach', 'reynolds'},
     'SetActiveSolver': {'solver'},
@@ -55,6 +55,7 @@ _TXT_SWEEP = '\uc2a4\uc717'
 _TXT_TAPER = '\ud14c\uc774\ud37c'
 _TXT_DIHEDRAL = '\ub514\ud5e4\ub4dc\ub7f4'
 _TXT_TWIST = '\ud2b8\uc704\uc2a4\ud2b8'
+_TXT_WINGTIP = '\uc719\ud301'
 _TXT_LATEST_SOURCE = '\ucd5c\uc2e0 \ud574\uc11d \ucd9c\ucc98'
 _TXT_CORE_PERF = '\ud575\uc2ec \uc131\ub2a5'
 _TXT_AOA = '\ubc1b\uc74c\uac01'
@@ -90,6 +91,10 @@ _VSPAERO_LABELS = {
     'cmytot_min': '\ud53c\uce58 \ubaa8\uba58\ud2b8\uacc4\uc218 \ucd5c\uc18c\uac12',
     'e_ld_max': 'L/D \ucd5c\ub300 \uc9c0\uc810 \uc624\uc2a4\uc648\ub4dc \ud6a8\uc728',
 }
+
+
+def _wingtip_style_label(value: str) -> str:
+    return '\uc870\uc784\ud615' if value == 'pinched' else '\uc9c1\uc120\ud615'
 
 
 class CommandEngine:
@@ -188,6 +193,12 @@ class CommandEngine:
             if key in payload and payload[key] is not None:
                 p[key] = float(payload[key])
 
+        if 'wingtip_style' in payload and payload['wingtip_style'] is not None:
+            wingtip_style = str(payload['wingtip_style']).strip().lower()
+            if wingtip_style not in ('straight', 'pinched'):
+                raise ValueError('wingtip_style는 straight 또는 pinched 중 하나여야 합니다.')
+            p['wingtip_style'] = wingtip_style
+
         p['span_m'] = max(0.15, min(20.0, p['span_m']))
         p['aspect_ratio'] = max(2.0, min(30.0, p['aspect_ratio']))
         p['sweep_deg'] = max(-35.0, min(45.0, p['sweep_deg']))
@@ -238,7 +249,8 @@ class CommandEngine:
                 f"{_TXT_WING_SHAPE}: "
                 f"{_TXT_SPAN} {wp.span_m:.2f}m, AR {wp.aspect_ratio:.1f}, {_TXT_SWEEP} {wp.sweep_deg:.1f}{_TXT_DEG}, "
                 f"{_TXT_TAPER} {wp.taper_ratio:.2f}, {_TXT_DIHEDRAL} {wp.dihedral_deg:.1f}{_TXT_DEG}, "
-                f"{_TXT_TWIST} {wp.twist_deg:.1f}{_TXT_DEG}"
+                f"{_TXT_TWIST} {wp.twist_deg:.1f}{_TXT_DEG}, "
+                f"{_TXT_WINGTIP} {_wingtip_style_label(str(wp.wingtip_style))}"
             ),
         ]
 

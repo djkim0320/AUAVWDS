@@ -2,6 +2,7 @@ export type ProviderId = 'openai' | 'anthropic' | 'gemini' | 'grok';
 export type SolverId = 'openvsp' | 'neuralfoil';
 export type AnalysisMode = 'openvsp' | 'neuralfoil' | 'fallback';
 export type ExportFormat = 'obj' | 'json' | 'vsp3';
+export type WingtipStyle = 'straight' | 'pinched';
 
 export interface AirfoilSummary {
   code: string;
@@ -25,6 +26,7 @@ export interface WingParams {
   taper_ratio: number;
   dihedral_deg: number;
   twist_deg: number;
+  wingtip_style: WingtipStyle;
 }
 
 export interface WingMesh {

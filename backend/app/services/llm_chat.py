@@ -43,6 +43,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 'taper_ratio': {'type': 'number'},
                 'dihedral_deg': {'type': 'number'},
                 'twist_deg': {'type': 'number'},
+                'wingtip_style': {
+                    'type': 'string',
+                    'enum': ['straight', 'pinched'],
+                    'description': 'Wingtip planform style. Use straight as a neutral baseline, or pinched when the mission clearly benefits from a narrowed tip.',
+                },
             },
             'additionalProperties': False,
         },
@@ -519,6 +524,7 @@ class LLMChatOrchestrator:
             "- Explain for data-grounded interpretation of latest results.\n"
             "- Undo/Reset only when explicitly requested.\n"
             "- If user does not specify dihedral, use a small practical default and adjust it to the mission instead of assuming one fixed archetype.\n"
+            "- If user explicitly specifies the wingtip shape, follow it. Otherwise you may choose wingtip_style yourself when it materially helps the mission, but do not always assume pinched tips; straight is the neutral default.\n"
             "Do not hardcode specific airfoils or wing shapes. Infer from user requirements.\n"
             "If the user asks for analysis explanation or interpretation, prioritize numeric data from state_summary.\n"
             "For analysis explanation, base statements on active_metrics, active_curve_samples, precision_data, and vspaero_focus_data.\n"

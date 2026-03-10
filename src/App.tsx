@@ -193,7 +193,7 @@ function defaultState(): AppState {
       summary: { code: '', thickness_percent: 0, max_camber_percent: 0, max_camber_x_percent: 0 },
     },
     wing: {
-      params: { span_m: 1, aspect_ratio: 8, sweep_deg: 0, taper_ratio: 1, dihedral_deg: 5, twist_deg: 0 },
+      params: { span_m: 1, aspect_ratio: 8, sweep_deg: 0, taper_ratio: 1, dihedral_deg: 5, twist_deg: 0, wingtip_style: 'straight' },
       preview_mesh: null,
       planform_2d: null,
     },

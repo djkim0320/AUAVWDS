@@ -87,6 +87,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                 solver_extra={
                     "script_path": str(script_path),
                     "solver_airfoil": case["solver_airfoil"],
+                    "solver_wingtip": case["solver_wingtip"],
                 },
             )
 
@@ -125,6 +126,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                     "command": cmd,
                     "script_path": str(script_path),
                     "solver_airfoil": case["solver_airfoil"],
+                    "solver_wingtip": case["solver_wingtip"],
                 },
             )
 
@@ -149,6 +151,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                     "command": cmd,
                     "script_path": str(script_path),
                     "solver_airfoil": case["solver_airfoil"],
+                    "solver_wingtip": case["solver_wingtip"],
                 },
             )
 
@@ -192,6 +195,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             "result_level": "wing_solver",
             "analysis_conditions": conditions.model_dump(),
             "solver_airfoil": case["solver_airfoil"],
+            "solver_wingtip": case["solver_wingtip"],
             "precision_data": precision_data,
             "vspaero_all_data": vspaero_all_data,
             "vspaero_all_data_raw": vspaero_all_data_raw,
@@ -215,7 +219,11 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             analysis_mode="openvsp",
             fallback_reason=None,
             extra_data=extra_data,
-            notes=_build_openvsp_notes(case["solver_airfoil"], curve_filtering=curve_payload["filtering"]),
+            notes=_build_openvsp_notes(
+                case["solver_airfoil"],
+                curve_filtering=curve_payload["filtering"],
+                solver_wingtip=case["solver_wingtip"],
+            ),
         )
     except subprocess.TimeoutExpired:
         return _openvsp_fallback_result(
@@ -325,6 +333,9 @@ def _build_case_geometry(
     c_tip = c_root * taper
     semi = span * 0.5
     mac = (2.0 / 3.0) * c_root * ((1.0 + taper + taper * taper) / (1.0 + taper))
+    requested_wingtip_style = str(params.get("wingtip_style") or "straight").strip().lower()
+    if requested_wingtip_style not in ("straight", "pinched"):
+        requested_wingtip_style = "straight"
 
     alpha_npts = max(2, int(round((aoa_end - aoa_start) / max(0.25, aoa_step))) + 1)
     airfoil_script = _build_airfoil_script(solver_airfoil)
@@ -420,6 +431,16 @@ def _build_case_geometry(
         "cref": mac,
         "bref": span,
         "solver_airfoil": solver_airfoil,
+        "solver_wingtip": {
+            "requested_style": requested_wingtip_style,
+            "used_style": "straight",
+            "geometry_kind": "single_taper_section",
+            "degraded_note": (
+                "조임형 윙팁 프리뷰는 현재 OpenVSP 해석에서 등가 직선 테이퍼 팁으로 근사합니다."
+                if requested_wingtip_style == "pinched"
+                else None
+            ),
+        },
     }
 
 
@@ -537,10 +558,15 @@ def _vsp_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _build_openvsp_notes(solver_airfoil: dict[str, Any], curve_filtering: dict[str, Any] | None = None) -> str:
+def _build_openvsp_notes(
+    solver_airfoil: dict[str, Any],
+    curve_filtering: dict[str, Any] | None = None,
+    solver_wingtip: dict[str, Any] | None = None,
+) -> str:
     requested = str(solver_airfoil.get("requested_label") or "선택한 에어포일")
     geometry_kind = str(solver_airfoil.get("geometry_kind") or "")
     filtering = curve_filtering or {}
+    wingtip = solver_wingtip or {}
     dropped = int(filtering.get("dropped_row_count") or 0)
     aoa_range = filtering.get("used_aoa_range")
     requested_range = filtering.get("requested_aoa_range")
@@ -564,11 +590,19 @@ def _build_openvsp_notes(solver_airfoil: dict[str, Any], curve_filtering: dict[s
                 suffix += f" 전체 요청 구간을 그대로 결과에 반영했습니다."
 
     if geometry_kind == "custom_file":
-        return f"{requested}의 좌표 파일을 사용해 OpenVSP/VSPAERO 정밀 해석을 완료했습니다.{suffix}"
-    degraded_note = solver_airfoil.get("degraded_note")
-    if isinstance(degraded_note, str) and degraded_note.strip():
-        return f"{degraded_note}{suffix}"
-    return f"{requested} 형상을 사용해 OpenVSP/VSPAERO 정밀 해석을 완료했습니다.{suffix}"
+        base = f"{requested}의 좌표 파일을 사용해 OpenVSP/VSPAERO 정밀 해석을 완료했습니다."
+    else:
+        degraded_note = solver_airfoil.get("degraded_note")
+        if isinstance(degraded_note, str) and degraded_note.strip():
+            base = degraded_note
+        else:
+            base = f"{requested} 형상을 사용해 OpenVSP/VSPAERO 정밀 해석을 완료했습니다."
+
+    tip_note = wingtip.get("degraded_note")
+    if isinstance(tip_note, str) and tip_note.strip():
+        base = f"{base} {tip_note}"
+
+    return f"{base}{suffix}"
 
 
 def _load_openvsp_curve(

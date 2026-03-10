@@ -471,6 +471,24 @@ button:disabled {
   flex-direction: column;
 }
 
+.canvas-workspace.aero-ui {
+  overflow: auto;
+  padding-right: 12px;
+}
+
+.canvas-workspace.aero-ui::-webkit-scrollbar {
+  width: 10px;
+}
+
+.canvas-workspace.aero-ui::-webkit-scrollbar-thumb {
+  background: #274869;
+  border-radius: 999px;
+}
+
+.canvas-workspace.aero-ui::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 .panel-title-row {
   display: flex;
   align-items: center;

@@ -5,12 +5,13 @@ from pathlib import Path
 
 import uvicorn
 
-from app.api import create_app
-
-
+from app.runtime.native import prepare_native_runtime_dirs
 HOST = os.getenv('AUAV_BACKEND_HOST', '127.0.0.1')
 PORT = int(os.getenv('AUAV_BACKEND_PORT', '18080'))
 WORK_DIR = Path(os.getenv('APP_WORK_DIR', Path(__file__).resolve().parent / 'work'))
+
+prepare_native_runtime_dirs()
+from app.api import create_app
 
 app = create_app(WORK_DIR)
 
