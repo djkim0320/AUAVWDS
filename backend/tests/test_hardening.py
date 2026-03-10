@@ -26,6 +26,7 @@ from app.geometry.wing_builder import _mock_pressure, build_wing_mesh
 from app.models.state import AeroCurve, AirfoilState, AirfoilSummary, AppState, WingParams, get_active_result, set_solver_result
 from app.runtime.native import _reset_native_runtime_for_tests, prepare_native_runtime_dirs
 from app.services.state_store import SaveManager
+from app.services.state_summary import build_llm_state_summary
 
 
 class ApiHardeningTests(unittest.TestCase):
@@ -79,10 +80,10 @@ class ApiHardeningTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(captured['history'], [{'role': 'assistant', 'content': 'previous reply'}])
 
-    def test_export_ignores_external_path_and_writes_inside_exports_dir(self) -> None:
+    def test_export_writes_inside_generated_exports_dir(self) -> None:
         self._prepare_mesh()
 
-        res = self.client.post('/export/cfd', json={'format': 'json', 'output_path': '..\\outside.obj'})
+        res = self.client.post('/export/cfd', json={'format': 'json'})
 
         self.assertEqual(res.status_code, 200)
         payload = res.json()
@@ -121,26 +122,28 @@ class ApiHardeningTests(unittest.TestCase):
 
         build_mesh = self.client.post('/command', json={'command': {'type': 'BuildWingMesh', 'payload': {}}})
         self.assertEqual(build_mesh.status_code, 200)
-        self._assert_client_state_shape(build_mesh.json()['state'], expect_mesh=True)
+        self._assert_client_state_shape(build_mesh.json()['state'])
 
         neuralfoil = self.client.post('/command', json={'command': {'type': 'RunNeuralFoilAnalysis', 'payload': {}}})
         self.assertEqual(neuralfoil.status_code, 200)
-        self._assert_client_state_shape(neuralfoil.json()['state'], expect_mesh=True)
+        self._assert_client_state_shape(neuralfoil.json()['state'])
 
         full_state = self.client.get('/state').json()
         client_state = self.client.get('/state/client').json()
-        self._assert_client_state_shape(client_state, expect_mesh=True)
+        self._assert_client_state_shape(client_state)
 
         self.assertGreaterEqual(len(full_state['history']), 1)
         self.assertTrue(full_state['airfoil']['coords'])
         self.assertIsNotNone(full_state['wing']['planform_2d'])
         self.assertTrue(full_state['wing']['preview_mesh']['pressure_overlay'])
+        self.assertIsNone(client_state['wing']['preview_mesh'])
 
         full_extra = full_state['analysis']['results']['neuralfoil']['extra_data']
         client_extra = client_state['analysis']['results']['neuralfoil']['extra_data']
         self.assertIn('raw_neuralfoil_output', full_extra)
         self.assertNotIn('raw_neuralfoil_output', client_extra)
         self.assertIn('solver_scalar_data', client_extra)
+        self.assertEqual(client_state['analysis']['results']['neuralfoil']['curve']['aoa_deg'], [])
 
     def test_reset_chat_and_load_return_client_state_shape(self) -> None:
         self._prepare_mesh()
@@ -167,9 +170,9 @@ class ApiHardeningTests(unittest.TestCase):
         self.assertEqual(chat_res.status_code, 200)
         self.assertEqual(reset_res.status_code, 200)
         self.assertEqual(load_res.status_code, 200)
-        self._assert_client_state_shape(chat_res.json()['state'], expect_mesh=True)
-        self._assert_client_state_shape(reset_res.json()['state'], expect_mesh=False)
-        self._assert_client_state_shape(load_res.json()['state'], expect_mesh=True)
+        self._assert_client_state_shape(chat_res.json()['state'])
+        self._assert_client_state_shape(reset_res.json()['state'])
+        self._assert_client_state_shape(load_res.json()['state'])
 
     def test_set_wing_accepts_explicit_wingtip_style(self) -> None:
         res = self.client.post(
@@ -277,8 +280,65 @@ class ApiHardeningTests(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
         self.assertEqual(mocked_build.call_count, 1)
-        self._assert_client_state_shape(first.json()['state'], expect_mesh=True)
-        self._assert_client_state_shape(second.json()['state'], expect_mesh=True)
+        self._assert_client_state_shape(first.json()['state'])
+        self._assert_client_state_shape(second.json()['state'])
+
+    def test_noop_commands_do_not_pollute_history(self) -> None:
+        scenarios = [
+            {'type': 'SetAirfoil', 'payload': {'code': '2412'}},
+            {'type': 'SetWing', 'payload': {'span_m': 2.4, 'sweep_deg': 12.0}},
+            {'type': 'SetAnalysisConditions', 'payload': {'aoa_start': -4.0, 'aoa_end': 12.0, 'aoa_step': 2.0, 'mach': 0.12, 'reynolds': 450000}},
+            {'type': 'SetActiveSolver', 'payload': {'solver': 'neuralfoil'}},
+        ]
+
+        for command in scenarios:
+            with self.subTest(command=command['type']):
+                self.client.post('/reset')
+                first = self.client.post('/command', json={'command': command})
+                second = self.client.post('/command', json={'command': command})
+                self.assertEqual(first.status_code, 200)
+                self.assertEqual(second.status_code, 200)
+                full_state = self.client.get('/state').json()
+                self.assertEqual(len(full_state['history']), 1)
+
+    def test_mutating_commands_append_single_history_snapshot(self) -> None:
+        commands = [
+            {'type': 'SetAirfoil', 'payload': {'code': '2412'}},
+            {'type': 'SetWing', 'payload': {'span_m': 2.6}},
+            {'type': 'SetAnalysisConditions', 'payload': {'aoa_start': -6.0, 'aoa_end': 10.0, 'aoa_step': 2.0, 'mach': 0.11, 'reynolds': 350000}},
+            {'type': 'SetActiveSolver', 'payload': {'solver': 'neuralfoil'}},
+        ]
+
+        self.client.post('/reset')
+        for expected_length, command in enumerate(commands, start=1):
+            res = self.client.post('/command', json={'command': command})
+            self.assertEqual(res.status_code, 200)
+            full_state = self.client.get('/state').json()
+            self.assertEqual(len(full_state['history']), expected_length)
+
+    def test_repeated_build_wing_mesh_does_not_append_history_for_identical_geometry(self) -> None:
+        self.client.post('/reset')
+        self.client.post('/command', json={'command': {'type': 'SetAirfoil', 'payload': {'code': '2412'}}})
+
+        first = self.client.post('/command', json={'command': {'type': 'BuildWingMesh', 'payload': {}}})
+        second = self.client.post('/command', json={'command': {'type': 'BuildWingMesh', 'payload': {}}})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        full_state = self.client.get('/state').json()
+        self.assertEqual(len(full_state['history']), 2)
+
+    def test_llm_state_summary_excludes_full_curve_arrays(self) -> None:
+        state = AppState(airfoil=AirfoilState.model_validate(generate_naca4('2412')))
+        set_solver_result(state.analysis, 'neuralfoil', run_neuralfoil_analysis(state, self.work_dir))
+
+        summary = build_llm_state_summary(state)
+
+        self.assertNotIn('active_curve', summary)
+        self.assertIsNotNone(summary['active_curve_range'])
+        self.assertIsNotNone(summary['active_curve_samples'])
+        self.assertIn('precision_data', summary)
+        self.assertIn('vspaero_focus_data', summary)
 
     def _prepare_mesh(self) -> None:
         set_airfoil = self.client.post('/command', json={'command': {'type': 'SetAirfoil', 'payload': {'code': '2412'}}})
@@ -286,18 +346,21 @@ class ApiHardeningTests(unittest.TestCase):
         build_mesh = self.client.post('/command', json={'command': {'type': 'BuildWingMesh', 'payload': {}}})
         self.assertEqual(build_mesh.status_code, 200)
 
-    def _assert_client_state_shape(self, state: dict[str, object], *, expect_mesh: bool) -> None:
+    def _assert_client_state_shape(self, state: dict[str, object]) -> None:
         self.assertEqual(state['history'], [])
         self.assertEqual(state['airfoil']['coords'], [])
         self.assertEqual(state['airfoil']['upper'], [])
         self.assertEqual(state['airfoil']['lower'], [])
         self.assertEqual(state['airfoil']['camber'], [])
         self.assertIsNone(state['wing']['planform_2d'])
-        if expect_mesh:
-            self.assertIsNotNone(state['wing']['preview_mesh'])
-            self.assertEqual(state['wing']['preview_mesh']['pressure_overlay'], [])
-        else:
-            self.assertIsNone(state['wing']['preview_mesh'])
+        self.assertIsNone(state['wing']['preview_mesh'])
+        for solver in ('openvsp', 'neuralfoil'):
+            result = state['analysis']['results'][solver]
+            if result is not None:
+                self.assertEqual(result['curve']['aoa_deg'], [])
+                self.assertEqual(result['curve']['cl'], [])
+                self.assertEqual(result['curve']['cd'], [])
+                self.assertEqual(result['curve']['cm'], [])
 
 
 class PrecisionAnalysisTests(unittest.TestCase):
@@ -757,15 +820,13 @@ class ExportPathTests(unittest.TestCase):
             export_dir = (work_dir / 'exports').resolve()
 
             cases = [
-                (None, None, '.obj'),
-                ('ignored.json', None, '.json'),
-                ('C:\\temp\\ignored.vsp3', None, '.vsp3'),
-                (None, 'json', '.json'),
-                ('ignored.obj', 'vsp3', '.vsp3'),
+                (None, '.obj'),
+                ('json', '.json'),
+                ('vsp3', '.vsp3'),
             ]
 
-            for requested, requested_format, suffix in cases:
-                target = _build_export_path(work_dir, requested, requested_format).resolve()
+            for requested_format, suffix in cases:
+                target = _build_export_path(work_dir, requested_format).resolve()
                 self.assertTrue(target.is_relative_to(export_dir))
                 self.assertEqual(target.suffix, suffix)
 

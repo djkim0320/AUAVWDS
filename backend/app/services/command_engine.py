@@ -93,7 +93,10 @@ class CommandEngine:
         return CommandEnvelope(type=normalized_type, payload=dict(command.payload or {}))
 
     def execute(self, state: AppState, command: CommandEnvelope) -> tuple[AppState, str]:
-        command = self.validate_command(command)
+        prepared = self.prepare_command(command)
+        return self.execute_prepared(state, prepared)
+
+    def execute_prepared(self, state: AppState, command: CommandEnvelope) -> tuple[AppState, str]:
         cmd_type = command.type
         payload = command.payload or {}
 
@@ -111,55 +114,80 @@ class CommandEngine:
         if cmd_type == "Explain":
             return state, self._explain_state(state)
 
-        state.history.append(copy.deepcopy(state.model_dump(exclude={"history"})))
-        state.history = state.history[-30:]
-
         if cmd_type == "SetAirfoil":
+            history_snapshot = self._snapshot_without_history(state)
             before_airfoil = state.airfoil.model_dump()
             self._set_airfoil(state, payload)
-            if state.airfoil.model_dump() != before_airfoil:
+            mutated = state.airfoil.model_dump() != before_airfoil
+            if mutated:
+                self._push_history(state, history_snapshot)
                 self._invalidate_geometry_outputs(state)
                 clear_solver_results(state.analysis)
             return state, "\uc5d0\uc5b4\ud3ec\uc77c\uc744 \uc5c5\ub370\uc774\ud2b8\ud588\uc2b5\ub2c8\ub2e4."
 
         if cmd_type == "SetWing":
+            history_snapshot = self._snapshot_without_history(state)
             before_params = state.wing.params.model_dump()
             self._set_wing(state, payload)
-            if state.wing.params.model_dump() != before_params:
+            mutated = state.wing.params.model_dump() != before_params
+            if mutated:
+                self._push_history(state, history_snapshot)
                 self._invalidate_geometry_outputs(state)
                 clear_solver_results(state.analysis)
             return state, "\ub0a0\uac1c \ud615\uc0c1 \ud30c\ub77c\ubbf8\ud130\ub97c \uc5c5\ub370\uc774\ud2b8\ud588\uc2b5\ub2c8\ub2e4."
 
         if cmd_type == "BuildWingMesh":
+            history_snapshot = self._snapshot_without_history(state)
+            before_airfoil = state.airfoil.model_dump()
+            before_mesh = state.wing.preview_mesh.model_dump() if state.wing.preview_mesh else None
+            before_planform = state.wing.planform_2d.model_dump() if state.wing.planform_2d else None
             if not state.airfoil.upper:
                 self._set_airfoil(state, {"code": "2412"})
             mesh, planform = self._get_or_build_mesh(state)
             state.wing.preview_mesh = mesh
             state.wing.planform_2d = planform
+            mutated = (
+                state.airfoil.model_dump() != before_airfoil
+                or mesh.model_dump() != before_mesh
+                or planform.model_dump() != before_planform
+            )
+            if mutated:
+                self._push_history(state, history_snapshot)
             return state, "\ub0a0\uac1c 3D \uba54\uc2dc\ub97c \uc0dd\uc131\ud588\uc2b5\ub2c8\ub2e4."
 
         if cmd_type == "SetAnalysisConditions":
+            history_snapshot = self._snapshot_without_history(state)
             before_conditions = state.analysis.conditions.model_dump()
             self._set_analysis_conditions(state, payload)
-            if state.analysis.conditions.model_dump() != before_conditions:
+            mutated = state.analysis.conditions.model_dump() != before_conditions
+            if mutated:
+                self._push_history(state, history_snapshot)
                 clear_solver_results(state.analysis)
             return state, "\ud574\uc11d \uc870\uac74\uc744 \uc5c5\ub370\uc774\ud2b8\ud588\uc2b5\ub2c8\ub2e4."
 
         if cmd_type == "SetActiveSolver":
+            history_snapshot = self._snapshot_without_history(state)
+            before_solver = state.analysis.active_solver
             self._set_active_solver(state, payload)
+            if state.analysis.active_solver != before_solver:
+                self._push_history(state, history_snapshot)
             return state, "\ud65c\uc131 solver\ub97c \ubcc0\uacbd\ud588\uc2b5\ub2c8\ub2e4."
 
         if cmd_type == "RunOpenVspAnalysis":
+            history_snapshot = self._snapshot_without_history(state)
             if not state.airfoil.upper:
                 self._set_airfoil(state, {"code": "2412"})
             result = run_precision_analysis(state, self.work_dir, payload)
+            self._push_history(state, history_snapshot)
             set_solver_result(state.analysis, "openvsp", result)
             return state, "OpenVSP/VSPAERO \ud574\uc11d\uc744 \uc644\ub8cc\ud588\uc2b5\ub2c8\ub2e4."
 
         if cmd_type == "RunNeuralFoilAnalysis":
+            history_snapshot = self._snapshot_without_history(state)
             if not state.airfoil.upper:
                 self._set_airfoil(state, {"code": "2412"})
             result = run_neuralfoil_analysis(state, self.work_dir, payload)
+            self._push_history(state, history_snapshot)
             set_solver_result(state.analysis, "neuralfoil", result)
             return state, "NeuralFoil \uae30\ubc18 \ub0a0\uac1c \ucd94\uc815 \ud574\uc11d\uc744 \uc644\ub8cc\ud588\uc2b5\ub2c8\ub2e4."
 
@@ -231,6 +259,15 @@ class CommandEngine:
         if solver not in ("openvsp", "neuralfoil"):
             raise ValueError("solver\ub294 openvsp \ub610\ub294 neuralfoil \uc911 \ud558\ub098\uc5ec\uc57c \ud569\ub2c8\ub2e4.")
         state.analysis.active_solver = solver
+
+    @staticmethod
+    def _snapshot_without_history(state: AppState) -> dict[str, Any]:
+        return copy.deepcopy(state.model_dump(exclude={"history"}))
+
+    @staticmethod
+    def _push_history(state: AppState, snapshot: dict[str, Any]) -> None:
+        state.history.append(snapshot)
+        state.history = state.history[-30:]
 
     @staticmethod
     def _invalidate_geometry_outputs(state: AppState) -> None:
@@ -368,13 +405,10 @@ class CommandEngine:
 
     @staticmethod
     def command_from_tool(name: str, args: dict[str, Any] | None) -> CommandEnvelope:
-        normalized_name = normalize_command_name(name)
-        if allowed_payload_keys(normalized_name) is None:
-            raise ValueError(f"\uc54c \uc218 \uc5c6\ub294 \ub3c4\uad6c \ub610\ub294 \uba85\ub839\uc785\ub2c8\ub2e4: {name}")
-        return CommandEngine.validate_command(CommandEnvelope(type=normalized_name, payload=args or {}))
+        return CommandEngine.prepare_command(CommandEnvelope(type=name, payload=args or {}))
 
     @staticmethod
-    def validate_command(command: CommandEnvelope) -> CommandEnvelope:
+    def prepare_command(command: CommandEnvelope) -> CommandEnvelope:
         requested_type = command.type
         payload = command.payload or {}
         if not isinstance(payload, dict):

@@ -223,6 +223,10 @@ function hasAnyAnalysis(state: AppState): boolean {
   return Boolean(state.analysis.results.openvsp || state.analysis.results.neuralfoil);
 }
 
+function tabNeedsDetail(tab: TabId): boolean {
+  return tab === 'wing3d' || tab === 'aero';
+}
+
 function findModelById(modelId: string): ModelCard | undefined {
   return MODEL_CATALOG.find((m) => m.id === modelId);
 }
@@ -259,11 +263,13 @@ function readProviderConfig(): Record<ProviderId, ProviderConfig> {
 
 export default function App() {
   const initialProvider = (localStorage.getItem(LS_PROVIDER) as ProviderId) || 'gemini';
-  const [state, setState] = useState<AppState>(defaultState);
+  const [summaryState, setSummaryState] = useState<AppState>(defaultState);
+  const [detailState, setDetailState] = useState<AppState | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>('wing3d');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isBusy, setIsBusy] = useState(false);
+  const [hasLoadedInitialState, setHasLoadedInitialState] = useState(false);
 
   const [providerConfigs, setProviderConfigs] = useState<Record<ProviderId, ProviderConfig>>(readProviderConfig);
   const [provider, setProvider] = useState<ProviderId>(initialProvider);
@@ -292,13 +298,14 @@ export default function App() {
   const chatListRef = useRef<HTMLDivElement | null>(null);
 
   const activeModel = useMemo(() => modelById(model, provider), [model, provider]);
-  const activeProviderMeta = PROVIDER_META[provider];
   const savesById = useMemo(() => new Map(saves.map((save) => [save.id, save] as const)), [saves]);
   const saveOptions = useMemo(() => saves.map((save) => ({ id: save.id, name: save.name })), [saves]);
   const selectedSaveLabel = useMemo(
     () => (selectedSave ? `선택된 저장: ${savesById.get(selectedSave)?.name || selectedSave}` : '저장 기록 없음'),
     [selectedSave, savesById],
   );
+  const wingState = detailState?.wing ?? summaryState.wing;
+  const analysisState = detailState?.analysis ?? summaryState.analysis;
 
   useEffect(() => {
     localStorage.setItem(LS_PROVIDER, provider);
@@ -347,6 +354,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!hasLoadedInitialState || !tabNeedsDetail(activeTab) || detailState) return;
+    void refreshDetailState();
+  }, [activeTab, detailState, hasLoadedInitialState]);
+
+  useEffect(() => {
     if (!chatListRef.current) return;
     chatListRef.current.scrollTop = chatListRef.current.scrollHeight;
   }, [messages, isBusy]);
@@ -370,9 +382,37 @@ export default function App() {
   }, []);
 
   async function refreshStateAndSaves() {
-    const [statePayload, savesPayload] = await Promise.all([bridge.getState(), bridge.listSaves()]);
-    setState(statePayload);
+    const includeDetail = tabNeedsDetail(activeTab);
+    const [statePayload, savesPayload, detailPayload] = await Promise.all([
+      bridge.getState(),
+      bridge.listSaves(),
+      includeDetail ? bridge.getFullState() : Promise.resolve(null),
+    ]);
+    setSummaryState(statePayload);
+    setDetailState(detailPayload);
     setSaves(savesPayload.saves || []);
+    setHasLoadedInitialState(true);
+  }
+
+  async function refreshDetailState() {
+    try {
+      const fullState = await bridge.getFullState();
+      setDetailState(fullState);
+      return fullState;
+    } catch {
+      setDetailState(null);
+      return null;
+    }
+  }
+
+  function applySummaryState(nextState: AppState) {
+    setSummaryState(nextState);
+    setDetailState(null);
+  }
+
+  async function syncDetailIfVisible() {
+    if (!tabNeedsDetail(activeTab)) return null;
+    return refreshDetailState();
   }
 
   function hasApiKey(p: ProviderId): boolean {
@@ -407,7 +447,12 @@ export default function App() {
         base_url: cfg.baseUrl,
         api_key: cfg.apiKey,
       });
-      setState(res.state);
+      if (res.applied_commands.length > 0) {
+        applySummaryState(res.state);
+        await syncDetailIfVisible();
+      } else {
+        setSummaryState(res.state);
+      }
       const reply = (res.assistant_message || res.explanation || '모델 응답을 받지 못했어요. 다시 시도해 주세요.').trim();
       appendAssistantMessage(reply);
     } catch (err: any) {
@@ -420,7 +465,8 @@ export default function App() {
   async function onResetState() {
     try {
       const res = await bridge.reset();
-      setState(res.state);
+      setSummaryState(res.state);
+      setDetailState(null);
       setMessages([]);
       setCompareSummary('');
     } catch (err: any) {
@@ -435,24 +481,48 @@ export default function App() {
     reflex_percent: number;
   }) {
     setIsApplyingAirfoil(true);
+    let latestState: AppState | null = null;
+    let backendMutated = false;
     try {
-      const rerunSolver = state.analysis.active_solver;
-      const hadAnalysisBefore = hasAnyAnalysis(state);
+      const rerunSolver = summaryState.analysis.active_solver;
+      const hadAnalysisBefore = hasAnyAnalysis(summaryState);
       const setRes = await bridge.command({ command: { type: 'SetAirfoil', payload: { custom } } });
+      latestState = setRes.state ?? latestState;
+      backendMutated = true;
       const meshRes = await bridge.command({ command: { type: 'BuildWingMesh', payload: {} } });
+      latestState = meshRes.state ?? latestState;
       if (hadAnalysisBefore) {
         const analysisRes = await bridge.command({ command: { type: solverCommand(rerunSolver), payload: {} } });
-        setState(analysisRes.state ?? meshRes.state ?? setRes.state);
+        latestState = analysisRes.state ?? latestState;
+        if (latestState) {
+          applySummaryState(latestState);
+          await syncDetailIfVisible();
+        }
         appendAssistantMessage(
           rerunSolver === 'neuralfoil'
             ? '커스텀 에어포일을 적용했고, 기존 NeuralFoil 해석까지 다시 갱신했어요.'
             : '커스텀 에어포일을 적용했고, 기존 OpenVSP 해석까지 다시 갱신했어요.',
         );
       } else {
-        setState(meshRes.state ?? setRes.state);
+        if (latestState) {
+          applySummaryState(latestState);
+          await syncDetailIfVisible();
+        }
         appendAssistantMessage('커스텀 에어포일을 적용해 3D 형상만 빠르게 갱신했어요. 필요하면 정밀 공력해석을 실행해 주세요.');
       }
     } catch (err: any) {
+      if (backendMutated) {
+        try {
+          const freshState = await bridge.getState();
+          latestState = freshState;
+          applySummaryState(freshState);
+        } catch {
+          if (latestState) {
+            applySummaryState(latestState);
+          }
+        }
+        await syncDetailIfVisible();
+      }
       appendAssistantMessage(`커스텀 에어포일 적용 실패: ${err?.message || String(err)}`);
     } finally {
       setIsApplyingAirfoil(false);
@@ -474,7 +544,8 @@ export default function App() {
     if (!selectedSave) return;
     try {
       const res = await bridge.loadSnapshot({ save_id: selectedSave });
-      setState(res.state);
+      applySummaryState(res.state);
+      await syncDetailIfVisible();
       appendAssistantMessage(res.assistant_message || '저장 상태를 불러왔어요.');
     } catch (err: any) {
       appendAssistantMessage(`불러오기 실패: ${err?.message || String(err)}`);
@@ -509,13 +580,14 @@ export default function App() {
     setIsRunningAnalysis(true);
     try {
       const res = await bridge.command({ command: { type: solverCommand(solver), payload: {} } });
-      setState(res.state);
+      applySummaryState(res.state);
+      setActiveTab('aero');
+      await refreshDetailState();
       appendAssistantMessage(
         solver === 'neuralfoil'
           ? 'NeuralFoil 기반 날개 추정 해석을 실행했어요.'
           : 'OpenVSP/VSPAERO 정밀 해석을 실행했어요.',
       );
-      setActiveTab('aero');
     } catch (err: any) {
       appendAssistantMessage(`해석 실행 실패: ${err?.message || String(err)}`);
     } finally {
@@ -526,7 +598,8 @@ export default function App() {
   async function onSelectActiveSolver(solver: SolverId) {
     try {
       const res = await bridge.command({ command: { type: 'SetActiveSolver', payload: { solver } } });
-      setState(res.state);
+      applySummaryState(res.state);
+      await syncDetailIfVisible();
     } catch (err: any) {
       appendAssistantMessage(`해석 결과 전환 실패: ${err?.message || String(err)}`);
     }
@@ -536,7 +609,8 @@ export default function App() {
     setIsUpdatingConditions(true);
     try {
       const res = await bridge.command({ command: { type: 'SetAnalysisConditions', payload: conditions } });
-      setState(res.state);
+      applySummaryState(res.state);
+      await syncDetailIfVisible();
       appendAssistantMessage('해석 조건을 업데이트했어요.');
     } catch (err: any) {
       appendAssistantMessage(`해석 조건 업데이트 실패: ${err?.message || String(err)}`);
@@ -714,22 +788,22 @@ export default function App() {
         <section className="canvas-panel">
           {activeTab === 'airfoil' && (
             <AirfoilTab
-              airfoil={state.airfoil}
+              airfoil={summaryState.airfoil}
               onApplyCustom={onApplyCustomAirfoil}
               isApplying={isApplyingAirfoil}
             />
           )}
           {activeTab === 'wing3d' && (
             <Wing3DTab
-              wing={state.wing}
-              analysis={state.analysis}
+              wing={wingState}
+              analysis={analysisState}
               onExportCfd={onExportCfd}
               isExporting={isExporting}
             />
           )}
           {activeTab === 'aero' && (
             <AerodynamicsTab
-              analysis={state.analysis}
+              analysis={analysisState}
               onRunAnalysis={onRunAnalysis}
               onSelectSolver={onSelectActiveSolver}
               onUpdateConditions={onUpdateAnalysisConditions}

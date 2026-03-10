@@ -183,7 +183,6 @@ function registerIpc() {
   ipcMain.handle('backend:chat', (_evt, req) => invokeBackend('/chat', 'POST', req));
   ipcMain.handle('backend:command', (_evt, req) => invokeBackend('/command', 'POST', req));
   ipcMain.handle('backend:reset', () => invokeBackend('/reset', 'POST'));
-  ipcMain.handle('backend:discover-models', (_evt, req) => invokeBackend('/llm/discover', 'POST', req));
 
   ipcMain.handle('backend:list-saves', () => invokeBackend('/saves'));
   ipcMain.handle('backend:save', (_evt, req) => invokeBackend('/saves', 'POST', req));
@@ -193,7 +192,7 @@ function registerIpc() {
 }
 
 async function createWindow() {
-  const baseUrl = await startBackend();
+  await startBackend();
 
   mainWindow = new BrowserWindow({
     width: 1600,
@@ -217,10 +216,6 @@ async function createWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
-  });
-
-  mainWindow.webContents.once('did-finish-load', () => {
-    mainWindow?.webContents.send('backend:ready', { baseUrl });
   });
 }
 

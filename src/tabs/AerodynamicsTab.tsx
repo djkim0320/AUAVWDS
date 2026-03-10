@@ -465,6 +465,12 @@ const ConditionsEditor = memo(function ConditionsEditor({
   onApply: (conditions: AnalysisConditions) => Promise<void>;
   isUpdating: boolean;
 }) {
+  const [reynoldsInput, setReynoldsInput] = useState(() => (draft.reynolds === null ? '' : String(draft.reynolds)));
+
+  useEffect(() => {
+    setReynoldsInput(draft.reynolds === null ? '' : String(draft.reynolds));
+  }, [draft.reynolds]);
+
   return (
     <div className="conditions-card">
       <div className="provenance-title">해석 조건</div>
@@ -473,13 +479,27 @@ const ConditionsEditor = memo(function ConditionsEditor({
         <NumberField label="AoA 종료" value={draft.aoa_end} step={0.5} onChange={(value) => onDraftChange({ ...draft, aoa_end: value })} />
         <NumberField label="AoA 간격" value={draft.aoa_step} step={0.25} onChange={(value) => onDraftChange({ ...draft, aoa_step: value })} />
         <NumberField label="마하수" value={draft.mach} step={0.01} onChange={(value) => onDraftChange({ ...draft, mach: value })} />
-        <NumberField
-          label="레이놀즈수"
-          value={draft.reynolds ?? 0}
-          step={10000}
-          allowEmpty
-          onChange={(value) => onDraftChange({ ...draft, reynolds: value > 0 ? value : null })}
-        />
+        <label className="condition-field">
+          <span>레이놀즈수</span>
+          <input
+            type="number"
+            inputMode="decimal"
+            step={10000}
+            value={reynoldsInput}
+            onChange={(e) => {
+              const nextValue = e.target.value;
+              setReynoldsInput(nextValue);
+              if (nextValue === '') {
+                onDraftChange({ ...draft, reynolds: null });
+                return;
+              }
+              const parsed = Number(nextValue);
+              if (Number.isFinite(parsed)) {
+                onDraftChange({ ...draft, reynolds: parsed > 0 ? parsed : null });
+              }
+            }}
+          />
+        </label>
       </div>
       <div className="conditions-actions">
         <button disabled={isUpdating} onClick={() => void onApply(draft)}>
@@ -505,29 +525,20 @@ function NumberField({
   value,
   step,
   onChange,
-  allowEmpty = false,
 }: {
   label: string;
   value: number;
   step: number;
   onChange: (value: number) => void;
-  allowEmpty?: boolean;
 }) {
   return (
     <label className="condition-field">
       <span>{label}</span>
       <input
         type="number"
-        value={allowEmpty && !Number.isFinite(value) ? '' : value}
+        value={value}
         step={step}
-        onChange={(e) => {
-          const next = e.target.value;
-          if (allowEmpty && next === '') {
-            onChange(0);
-            return;
-          }
-          onChange(Number(next));
-        }}
+        onChange={(e) => onChange(Number(e.target.value))}
       />
     </label>
   );
@@ -569,11 +580,12 @@ const Chart = memo(function Chart({
 
     return {
       points,
-      axisSpan: yMaxAxis - yMinAxis,
+      xAxisSpan: Math.max(Math.abs(xMax - xMin), 1e-9),
+      yAxisSpan: yMaxAxis - yMinAxis,
       yMinAxis,
       yMaxAxis,
     };
-  }, [x, y]);
+  }, [x, xMax, xMin, y]);
 
   const option = useMemo(() => {
     if (!prepared) return null;
@@ -592,7 +604,7 @@ const Chart = memo(function Chart({
         splitLine: { lineStyle: { color: '#162a42' } },
         axisLabel: {
           color: '#9cb0c8',
-          formatter: (value: number) => fmtAdaptive(Number(value), prepared.axisSpan, 1, 5),
+          formatter: (value: number) => fmtAdaptive(Number(value), prepared.xAxisSpan, 1, 5),
         },
         nameTextStyle: { color: '#8ea3bc' },
       },
@@ -606,7 +618,7 @@ const Chart = memo(function Chart({
         splitLine: { lineStyle: { color: '#162a42' } },
         axisLabel: {
           color: '#9cb0c8',
-          formatter: (value: number) => fmtAdaptive(Number(value), prepared.axisSpan, 2, 5),
+          formatter: (value: number) => fmtAdaptive(Number(value), prepared.yAxisSpan, 2, 5),
         },
         nameTextStyle: { color: '#8ea3bc' },
       },
@@ -618,7 +630,7 @@ const Chart = memo(function Chart({
         formatter: (params: Array<{ data?: [number, number] }>) => {
           const point = params?.[0]?.data;
           if (!point) return '';
-          return `받음각 ${trimTrailingZeros(Number(point[0]).toFixed(1))}도<br/>${yName}: ${fmtAdaptive(Number(point[1]), prepared.axisSpan, 3, 6)}`;
+          return `받음각 ${fmtAdaptive(Number(point[0]), prepared.xAxisSpan, 1, 5)}도<br/>${yName}: ${fmtAdaptive(Number(point[1]), prepared.yAxisSpan, 3, 6)}`;
         },
       },
       series: [

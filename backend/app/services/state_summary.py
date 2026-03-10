@@ -50,10 +50,6 @@ _CLIENT_NESTED_DICT_KEYS = (
     "vspaero_all_data",
     "solver_scalar_data",
 )
-_CLIENT_ARTIFACT_KEYS = (
-    "available_artifacts",
-    "curve_filtering",
-)
 
 
 def serialize_client_state(state: AppState) -> dict[str, Any]:
@@ -67,7 +63,7 @@ def serialize_client_state(state: AppState) -> dict[str, Any]:
         },
         "wing": {
             "params": state.wing.params.model_dump(),
-            "preview_mesh": _serialize_preview_mesh(state.wing.preview_mesh),
+            "preview_mesh": None,
             "planform_2d": None,
         },
         "analysis": {
@@ -103,24 +99,11 @@ def build_llm_state_summary(state: AppState) -> dict[str, Any]:
         "active_solver_airfoil": active.extra_data.get("solver_airfoil") if active else None,
         "has_mesh": bool(state.wing.preview_mesh and state.wing.preview_mesh.vertices),
         "active_metrics": active.metrics.model_dump() if active and active.metrics else None,
-        "active_curve": curve_summary["curve"],
         "active_curve_range": curve_summary["range"],
         "active_curve_samples": curve_summary["samples"],
         "precision_data": _copy_dict(active.extra_data.get("precision_data")) if active else None,
-        "vspaero_all_data": _copy_dict(active.extra_data.get("vspaero_all_data")) if active else None,
         "vspaero_focus_data": _vspaero_focus_data(active.extra_data.get("vspaero_all_data")) if active else None,
     }
-
-
-def _serialize_preview_mesh(mesh: Any) -> dict[str, Any] | None:
-    if mesh is None:
-        return None
-    return {
-        "vertices": mesh.vertices,
-        "triangles": mesh.triangles,
-        "pressure_overlay": [],
-    }
-
 
 def _serialize_analysis_result(result: AnalysisResult | None) -> dict[str, Any] | None:
     if result is None:
@@ -128,7 +111,7 @@ def _serialize_analysis_result(result: AnalysisResult | None) -> dict[str, Any] 
 
     return {
         "source_label": result.source_label,
-        "curve": result.curve.model_dump(),
+        "curve": _empty_curve_payload(),
         "metrics": result.metrics.model_dump() if result.metrics else None,
         "analysis_mode": result.analysis_mode,
         "fallback_reason": result.fallback_reason,
@@ -167,7 +150,7 @@ def _serialize_client_extra_data(extra: dict[str, Any]) -> dict[str, Any]:
 
 def _curve_summary(result: AnalysisResult | None) -> dict[str, Any]:
     if result is None:
-        return {"curve": None, "range": None, "samples": None}
+        return {"range": None, "samples": None}
 
     curve = {
         "aoa_deg": [float(x) for x in (result.curve.aoa_deg or [])],
@@ -180,7 +163,7 @@ def _curve_summary(result: AnalysisResult | None) -> dict[str, Any]:
     cd = curve["cd"]
     cm = curve["cm"]
     if not (aoa and cl and cd and cm):
-        return {"curve": curve, "range": None, "samples": None}
+        return {"range": None, "samples": None}
 
     samples: dict[str, dict[str, float]] = {}
     for target_aoa in _CURVE_SAMPLE_AOA:
@@ -196,7 +179,6 @@ def _curve_summary(result: AnalysisResult | None) -> dict[str, Any]:
         }
 
     return {
-        "curve": curve,
         "range": {
             "aoa_min": float(min(aoa)),
             "aoa_max": float(max(aoa)),
@@ -220,3 +202,12 @@ def _vspaero_focus_data(payload: Any) -> dict[str, float] | None:
 
 def _copy_dict(value: Any) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, dict) else None
+
+
+def _empty_curve_payload() -> dict[str, list[float]]:
+    return {
+        "aoa_deg": [],
+        "cl": [],
+        "cd": [],
+        "cm": [],
+    }

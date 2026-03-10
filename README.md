@@ -16,6 +16,7 @@ AUAVWDS는 Windows 10/11용 Electron + FastAPI 기반 날개 설계 앱입니다
 - CFD/연구용 내보내기
   - `OBJ`, `JSON`은 공통 지원
   - `VSP3`는 실제 `OpenVSP` 결과가 있을 때만 지원
+  - 모든 export 파일은 앱 작업 디렉터리의 `exports/` 아래에 생성됩니다.
 - 브라우저 개발/테스트 루트
   - Electron을 띄우지 않고도 Vite + FastAPI 조합으로 UI를 브라우저에서 테스트할 수 있습니다.
 
@@ -42,6 +43,11 @@ AUAVWDS는 Windows 10/11용 Electron + FastAPI 기반 날개 설계 앱입니다
   - `openvsp`
   - `neuralfoil`
   - `fallback`
+
+### 4. 상태 전달 구조
+- `/state`는 canonical full backend state입니다.
+- `/state/client`는 renderer가 자주 쓰는 lightweight summary DTO입니다.
+- Electron/web bridge는 기본적으로 summary state를 받고, `Wing 3D`/`Aerodynamics` 탭이 필요할 때만 full state를 추가 hydrate합니다.
 
 ## 지원 명령
 backend 명령 엔진은 현재 아래 명령을 지원합니다.
@@ -98,6 +104,7 @@ http://127.0.0.1:5173
 - backend는 `AUAV_ENABLE_WEB_BRIDGE=1`로 실행됩니다.
 - frontend는 HTTP bridge를 통해 `/api/*`로 backend를 호출합니다.
 - 저장/불러오기/비교/내보내기 데이터는 Electron 모드와 같은 backend 작업 디렉터리를 사용합니다.
+- 일반 UI 새로고침은 `/state/client`를 사용하고, mesh/curve 같은 큰 데이터는 `/state`에서만 가져옵니다.
 
 ## 빌드 / 패키징
 
@@ -150,14 +157,17 @@ npm run release:all
 ## 주요 API
 - `/health`
 - `/state`
+- `/state/client`
 - `/reset`
 - `/chat`
 - `/command`
-- `/llm/discover`
 - `/saves`
 - `/saves/load`
 - `/saves/compare`
 - `/export/cfd`
+
+참고:
+- `/llm/discover`는 backend 유틸리티 엔드포인트로 남아 있지만, 현재 renderer의 기본 bridge surface에서는 사용하지 않습니다.
 
 ## 프로젝트 구조
 ```text

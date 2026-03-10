@@ -58,7 +58,6 @@ class ModelDiscoverRequest(BaseModel):
 
 class ExportCfdRequest(BaseModel):
     format: Literal['obj', 'json', 'vsp3'] | None = None
-    output_path: str | None = None
 
 
 _SAVE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -112,14 +111,14 @@ def create_app(work_dir: Path) -> FastAPI:
     @app.post("/command")
     def command(req: CommandRequest) -> dict[str, Any]:
         try:
-            normalized_command = engine.validate_command(req.command)
-            next_state, explanation = store.transact(lambda state: engine.execute(state, normalized_command))
+            prepared_command = engine.prepare_command(req.command)
+            next_state, explanation = store.transact(lambda state: engine.execute_prepared(state, prepared_command))
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         return {
             "state": serialize_client_state(next_state),
-            "applied_commands": [normalized_command.model_dump()],
+            "applied_commands": [prepared_command.model_dump()],
             "explanation": explanation,
             "warnings": [],
             "assistant_message": explanation,
@@ -211,7 +210,7 @@ def create_app(work_dir: Path) -> FastAPI:
     @app.post("/export/cfd")
     def export_cfd(req: ExportCfdRequest) -> dict[str, Any]:
         state = store.get()
-        out = _build_export_path(work_dir, req.output_path, req.format)
+        out = _build_export_path(work_dir, req.format)
         suffix = out.suffix.lower()
 
         if suffix == ".vsp3":
@@ -275,7 +274,7 @@ def _run_chat_transaction(
     def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         nonlocal state
         cmd = CommandEngine.command_from_tool(name, args)
-        state, explanation = engine.execute(state, cmd)
+        state, explanation = engine.execute_prepared(state, cmd)
         applied_commands.append(cmd)
         tool_messages.append(explanation)
         return {
@@ -304,21 +303,18 @@ def _run_chat_transaction(
     }
 
 
-def _build_export_path(work_dir: Path, requested_output: str | None, requested_format: str | None = None) -> Path:
+def _build_export_path(work_dir: Path, requested_format: str | None = None) -> Path:
     export_dir = (work_dir / "exports").resolve()
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    requested = (requested_output or "").strip().lower()
     format_hint = (requested_format or "").strip().lower()
     suffix = ".obj"
 
     if format_hint:
         suffix = f".{format_hint}"
-    elif requested:
-        suffix = Path(requested).suffix.lower()
 
     if suffix not in _EXPORT_SUFFIXES:
-        raise HTTPException(status_code=400, detail=f"output_path suffix must be one of: {sorted(_EXPORT_SUFFIXES)}")
+        raise HTTPException(status_code=400, detail=f"format must be one of: {sorted(_EXPORT_SUFFIXES)}")
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     return export_dir / f"wing_{stamp}{suffix}"

@@ -1318,6 +1318,7 @@ button.ghost,
 
   .canvas-panel {
     padding: 8px;
+    overflow: auto;
   }
 
   .panel-title-row,
@@ -1346,6 +1347,15 @@ button.ghost,
   .history-drawer {
     width: min(100%, 560px);
     min-width: 0;
+  }
+
+  .canvas-workspace {
+    overflow: auto;
+  }
+
+  .svg-wrap,
+  .three-host {
+    min-height: 320px;
   }
 }
 
