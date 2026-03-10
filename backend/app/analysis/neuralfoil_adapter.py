@@ -180,6 +180,11 @@ def run_neuralfoil_analysis(state: AppState, work_dir: str | Path, payload: dict
             "representation_label": "에어포일 좌표",
             "geometry_kind": "coordinates",
         },
+        "solver_wingtip": {
+            "requested_style": str(params.wingtip_style),
+            "solver_style": str(params.wingtip_style),
+            "representation_label": f"{params.wingtip_style} wingtip correction",
+        },
         "result_level": "wing_estimate_from_2d_solver",
         "correction_model": "finite-wing-coupled-from-neuralfoil",
         "wing_correction_model": "finite-wing-coupled-from-neuralfoil",
@@ -235,6 +240,11 @@ def _neuralfoil_fallback_result(
         "analysis_conditions": conditions,
         "run_dir": str(run_dir),
         "result_level": "wing_estimate_fallback",
+        "solver_wingtip": {
+            "requested_style": str(params.get("wingtip_style") or "straight"),
+            "solver_style": str(params.get("wingtip_style") or "straight"),
+            "representation_label": "finite-wing correction",
+        },
         "correction_model": "finite-wing-coupled-from-neuralfoil",
         "wing_correction_model": "finite-wing-coupled-from-neuralfoil",
         "limitation_note": "VLM/패널 solver가 아니며, 2D 에어포일 해석 결과에 명시적 날개 보정을 적용한 추정 결과입니다.",

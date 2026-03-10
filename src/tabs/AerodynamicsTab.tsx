@@ -1,7 +1,16 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import SourceBadge from '../components/SourceBadge';
-import type { AnalysisConditions, AnalysisExtraData, AnalysisResult, AnalysisState, SolverEffectiveConditions, SolverId } from '../types';
+import type {
+  AnalysisConditions,
+  AnalysisExtraData,
+  AnalysisResult,
+  AnalysisState,
+  ComparisonMetrics,
+  ReferenceValuesUsed,
+  SolverEffectiveConditions,
+  SolverId,
+} from '../types';
 
 const SOLVER_BUTTONS: SolverId[] = ['openvsp', 'neuralfoil'];
 const CHART_STYLE = { width: '100%', height: 250 } as const;
@@ -10,6 +19,18 @@ const CHART_CONFIGS = [
   { key: 'ld', title: '양항비 (L/D)', color: '#efb35b', yName: 'L/D' },
   { key: 'cd', title: '항력계수 (CD)', color: '#6ce8be', yName: 'CD' },
 ] as const;
+const COMPARISON_BLOCKER_LABELS: Record<string, string> = {
+  missing_counterpart_result: 'Other solver result is missing',
+  fallback_result_present: 'A fallback result is present',
+  analysis_condition_mismatch: 'Requested analysis conditions do not match',
+  reynolds_mismatch: 'Effective Reynolds do not match',
+  no_effective_reynolds_in_vspaero: 'VSPAERO effective Reynolds is unavailable',
+  no_valid_aoa_overlap: 'No trustworthy shared AoA window',
+  reference_value_mismatch: 'Reference values differ',
+  geometry_mismatch: 'Geometry snapshot differs',
+  unsupported_airfoil_parity: 'Airfoil parity is not supported cleanly',
+  coefficient_family_unstable: 'Selected VSPAERO coefficient family is unstable',
+};
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, v));
@@ -104,6 +125,10 @@ function humanizeVspaeroKey(key: string): string {
   return `${label}${suffix}`;
 }
 
+function comparisonBlockerLabel(key: string): string {
+  return COMPARISON_BLOCKER_LABELS[key] || key.replace(/_/gu, ' ');
+}
+
 function preferredResult(analysis: AnalysisState): { solver: SolverId | null; result: AnalysisResult | null } {
   const active = analysis.results[analysis.active_solver];
   if (active) return { solver: analysis.active_solver, result: active };
@@ -174,6 +199,11 @@ function AerodynamicsTab({
           ? 'stdout 단일 표'
           : '-';
     const solverEffectiveConditions = (extra.solver_effective_conditions || null) as SolverEffectiveConditions | null;
+    const referenceValues = (extra.reference_values_used || null) as ReferenceValuesUsed | null;
+    const comparisonMetrics = (extra.comparison_metrics || null) as ComparisonMetrics | null;
+    const comparisonBlockers = Array.isArray(extra.comparison_blockers)
+      ? extra.comparison_blockers.map(String)
+      : [];
 
     return {
       solverLabel: String(extra.solver_label || (resultSolver === 'neuralfoil' ? 'NeuralFoil' : 'OpenVSP/VSPAERO')),
@@ -186,6 +216,7 @@ function AerodynamicsTab({
       selectedCoefficientFamily: String(extra.selected_coefficient_family_label || extra.selected_coefficient_family || '-'),
       coefficientSelection: selectionRule,
       solverEffectiveConditions,
+      referenceValues,
       requestedAoaRange:
         (extra.requested_aoa_range as Record<string, unknown> | undefined) ||
         (extra.analysis_conditions as Record<string, unknown> | undefined) ||
@@ -194,6 +225,12 @@ function AerodynamicsTab({
         (extra.valid_aoa_range as Record<string, unknown> | undefined) ||
         (filtering?.used_aoa_range as Record<string, unknown> | undefined),
       droppedRowCount: toNumber(filtering?.dropped_row_count),
+      comparisonReady: extra.comparison_ready === true,
+      comparisonBlockers,
+      comparisonWindow: (extra.comparison_aoa_window as Record<string, unknown> | undefined) || null,
+      comparisonMetrics,
+      comparisonSummary: String(extra.comparison_summary || ''),
+      comparisonCounterpart: String(extra.comparison_counterpart_solver || ''),
     };
   }, [analysis.conditions, result, resultSolver]);
 
@@ -379,6 +416,9 @@ function AerodynamicsTab({
             <div className="kv"><span>에어포일 표현</span><strong>{String(provenance.solverAirfoil?.representation_label || provenance.solverAirfoil?.geometry_kind || '-')}</strong></div>
             <div className="kv"><span>Solver ReCref</span><strong>{fmtInt(provenance.solverEffectiveConditions?.re_cref ?? null)}</strong></div>
             <div className="kv"><span>요청 Reynolds</span><strong>{fmtInt(provenance.solverEffectiveConditions?.requested_reynolds ?? null)}</strong></div>
+            <div className="kv"><span>Sref</span><strong>{fmt(toNumber(provenance.referenceValues?.sref), 4)}</strong></div>
+            <div className="kv"><span>Bref</span><strong>{fmt(toNumber(provenance.referenceValues?.bref), 4)}</strong></div>
+            <div className="kv"><span>Cref</span><strong>{fmt(toNumber(provenance.referenceValues?.cref), 4)}</strong></div>
             <div className="kv"><span>요청 해석 범위</span><strong>{fmtAoaRange(provenance.requestedAoaRange)}</strong></div>
             <div className="kv"><span>채택 유효 범위</span><strong>{fmtAoaRange(provenance.validAoaRange)}</strong></div>
             <div className="kv"><span>제외된 행 수</span><strong>{fmtInt(provenance.droppedRowCount)}</strong></div>
@@ -394,6 +434,33 @@ function AerodynamicsTab({
               <div className="solver-note provenance-note">{provenance.solverEffectiveConditions.reynolds_note}</div>
             )}
             {provenance.limitationNote && <div className="solver-note provenance-note">{provenance.limitationNote}</div>}
+          </div>
+          <div className="provenance-card">
+            <div className="provenance-title">Fair comparison</div>
+            <div className="kv"><span>Status</span><strong>{provenance.comparisonReady ? 'Ready' : 'Blocked'}</strong></div>
+            <div className="kv"><span>Counterpart</span><strong>{provenance.comparisonCounterpart || '-'}</strong></div>
+            <div className="kv"><span>Comparison AoA window</span><strong>{fmtAoaRange(provenance.comparisonWindow)}</strong></div>
+            {!provenance.comparisonReady && (
+              <div className="provenance-artifacts">
+                {provenance.comparisonBlockers.length > 0
+                  ? provenance.comparisonBlockers.map((item) => (
+                      <span key={item} className="metric-chip">{comparisonBlockerLabel(item)}</span>
+                    ))
+                  : <span className="muted">Direct comparison is not available yet.</span>}
+              </div>
+            )}
+            {provenance.comparisonReady && provenance.comparisonMetrics && (
+              <>
+                <div className="kv"><span>Shared points</span><strong>{fmtInt(provenance.comparisonMetrics.point_count ?? null)}</strong></div>
+                <div className="kv"><span>mean |ΔCL|</span><strong>{fmt(provenance.comparisonMetrics.cl_mean_abs_delta, 4)}</strong></div>
+                <div className="kv"><span>mean |ΔCD|</span><strong>{fmt(provenance.comparisonMetrics.cd_mean_abs_delta, 5)}</strong></div>
+                <div className="kv"><span>mean |ΔL/D|</span><strong>{fmt(provenance.comparisonMetrics.ld_mean_abs_delta, 3)}</strong></div>
+                <div className="kv"><span>CL_alpha delta</span><strong>{fmt(provenance.comparisonMetrics.cl_alpha_delta, 3)}</strong></div>
+                <div className="kv"><span>OpenVSP alpha@max L/D</span><strong>{fmt(provenance.comparisonMetrics.ld_max_aoa_openvsp, 2)}°</strong></div>
+                <div className="kv"><span>NeuralFoil alpha@max L/D</span><strong>{fmt(provenance.comparisonMetrics.ld_max_aoa_neuralfoil, 2)}°</strong></div>
+              </>
+            )}
+            {provenance.comparisonSummary && <div className="solver-note provenance-note">{provenance.comparisonSummary}</div>}
           </div>
         </div>
       )}

@@ -14,9 +14,10 @@ from pydantic import BaseModel, Field
 
 from app.models.state import AppState, CommandEnvelope, get_solver_result
 from app.services.command_engine import CommandEngine
+from app.services.fair_comparison import enrich_state_with_fair_comparison
 from app.services.llm_chat import LLMChatOrchestrator
 from app.services.state_store import SaveManager, StateStore
-from app.services.state_summary import build_llm_state_summary, serialize_client_state
+from app.services.state_summary import ClientAppState, build_llm_state_summary, serialize_client_state
 
 
 class ChatMessage(BaseModel):
@@ -60,6 +61,14 @@ class ExportCfdRequest(BaseModel):
     format: Literal['obj', 'json', 'vsp3'] | None = None
 
 
+class ClientStateResponse(BaseModel):
+    state: ClientAppState
+    applied_commands: list[CommandEnvelope] = Field(default_factory=list)
+    explanation: str
+    warnings: list[str] = Field(default_factory=list)
+    assistant_message: str | None = None
+
+
 _SAVE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _EXPORT_SUFFIXES = {".obj", ".json", ".vsp3"}
 
@@ -89,43 +98,45 @@ def create_app(work_dir: Path) -> FastAPI:
     def health() -> dict[str, Any]:
         return {"ok": True, "time": datetime.now(timezone.utc).isoformat()}
 
-    @app.get("/state")
-    def state() -> dict[str, Any]:
-        return store.get().model_dump()
+    @app.get("/state", response_model=AppState)
+    def state() -> AppState:
+        return enrich_state_with_fair_comparison(store.get())
 
-    @app.get("/state/client")
-    def client_state() -> dict[str, Any]:
-        return serialize_client_state(store.get())
+    @app.get("/state/client", response_model=ClientAppState)
+    def client_state() -> ClientAppState:
+        return serialize_client_state(enrich_state_with_fair_comparison(store.get()))
 
-    @app.post("/reset")
-    def reset() -> dict[str, Any]:
+    @app.post("/reset", response_model=ClientStateResponse)
+    def reset() -> ClientStateResponse:
         s, _ = store.transact(lambda _state: (AppState(), None))
-        return {
-            "state": serialize_client_state(s),
-            "applied_commands": [{"type": "Reset", "payload": {}}],
-            "explanation": "State reset complete.",
-            "warnings": [],
-            "assistant_message": "초기 상태로 리셋했어요.",
-        }
+        enriched = enrich_state_with_fair_comparison(s)
+        return ClientStateResponse(
+            state=serialize_client_state(enriched),
+            applied_commands=[CommandEnvelope(type="Reset", payload={})],
+            explanation="State reset complete.",
+            warnings=[],
+            assistant_message="초기 상태로 리셋했어요.",
+        )
 
-    @app.post("/command")
-    def command(req: CommandRequest) -> dict[str, Any]:
+    @app.post("/command", response_model=ClientStateResponse)
+    def command(req: CommandRequest) -> ClientStateResponse:
         try:
             prepared_command = engine.prepare_command(req.command)
             next_state, explanation = store.transact(lambda state: engine.execute_prepared(state, prepared_command))
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        return {
-            "state": serialize_client_state(next_state),
-            "applied_commands": [prepared_command.model_dump()],
-            "explanation": explanation,
-            "warnings": [],
-            "assistant_message": explanation,
-        }
+        enriched = enrich_state_with_fair_comparison(next_state)
+        return ClientStateResponse(
+            state=serialize_client_state(enriched),
+            applied_commands=[prepared_command],
+            explanation=explanation,
+            warnings=[],
+            assistant_message=explanation,
+        )
 
-    @app.post("/chat")
-    def chat(req: ChatRequest) -> dict[str, Any]:
+    @app.post("/chat", response_model=ClientStateResponse)
+    def chat(req: ChatRequest) -> ClientStateResponse:
         if not req.api_key.strip():
             raise HTTPException(status_code=400, detail="API key is required.")
 
@@ -153,13 +164,14 @@ def create_app(work_dir: Path) -> FastAPI:
         if not assistant:
             assistant = "모델 응답을 받지 못했어요. 다시 시도해 주세요."
 
-        return {
-            "state": serialize_client_state(state),
-            "applied_commands": [c.model_dump() for c in applied_commands],
-            "explanation": assistant,
-            "warnings": [],
-            "assistant_message": assistant,
-        }
+        enriched = enrich_state_with_fair_comparison(state)
+        return ClientStateResponse(
+            state=serialize_client_state(enriched),
+            applied_commands=applied_commands,
+            explanation=assistant,
+            warnings=[],
+            assistant_message=assistant,
+        )
 
     @app.post("/llm/discover")
     def discover(req: ModelDiscoverRequest) -> dict[str, Any]:
@@ -175,8 +187,8 @@ def create_app(work_dir: Path) -> FastAPI:
     def save_state(req: SaveRequest) -> dict[str, Any]:
         return saves.save(store.get(), req.name)
 
-    @app.post("/saves/load")
-    def load_state(req: LoadSaveRequest) -> dict[str, Any]:
+    @app.post("/saves/load", response_model=ClientStateResponse)
+    def load_state(req: LoadSaveRequest) -> ClientStateResponse:
         _validate_save_id(req.save_id)
         try:
             loaded = saves.load(req.save_id)
@@ -186,13 +198,14 @@ def create_app(work_dir: Path) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         loaded_state, _ = store.transact(lambda _state: (loaded, None))
-        return {
-            "state": serialize_client_state(loaded_state),
-            "applied_commands": [{"type": "Reset", "payload": {}}],
-            "explanation": "Saved snapshot loaded.",
-            "warnings": [],
-            "assistant_message": "저장한 상태를 불러왔어요.",
-        }
+        enriched = enrich_state_with_fair_comparison(loaded_state)
+        return ClientStateResponse(
+            state=serialize_client_state(enriched),
+            applied_commands=[CommandEnvelope(type="Reset", payload={})],
+            explanation="Saved snapshot loaded.",
+            warnings=[],
+            assistant_message="저장한 상태를 불러왔어요.",
+        )
 
     @app.post("/saves/compare")
     def compare_state(req: CompareSaveRequest) -> dict[str, Any]:
@@ -277,13 +290,15 @@ def _run_chat_transaction(
         state, explanation = engine.execute_prepared(state, cmd)
         applied_commands.append(cmd)
         tool_messages.append(explanation)
+        enriched = enrich_state_with_fair_comparison(state)
         return {
             "ok": True,
             "command": cmd.type,
             "message": explanation,
-            "state_summary": build_llm_state_summary(state),
+            "state_summary": build_llm_state_summary(enriched),
         }
 
+    initial_summary_state = enrich_state_with_fair_comparison(state)
     llm_out = llm.run_agent_turn(
         provider=req.provider,
         model=req.model,
@@ -291,7 +306,7 @@ def _run_chat_transaction(
         api_key=req.api_key,
         history=history,
         message=req.message,
-        state_summary=build_llm_state_summary(state),
+        state_summary=build_llm_state_summary(initial_summary_state),
         tool_executor=execute_tool,
     )
 

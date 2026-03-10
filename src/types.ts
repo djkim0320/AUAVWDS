@@ -99,12 +99,56 @@ export interface SolverEffectiveConditions {
   source?: string;
   requested_reynolds?: number | null;
   re_cref?: number | null;
+  effective_reynolds?: number | null;
   reynolds_applied?: boolean;
   reynolds_note?: string;
   mach?: number | null;
   wake_iterations?: number | null;
   aoa_range?: AoaRange | null;
   aoa_count?: number | null;
+}
+
+export interface ReferenceValuesUsed {
+  sref?: number | null;
+  bref?: number | null;
+  cref?: number | null;
+  source?: string;
+}
+
+export interface ComparisonAoaWindow {
+  start: number;
+  end: number;
+  point_count: number;
+}
+
+export interface ComparisonMetrics {
+  point_count: number;
+  cl_mean_abs_delta?: number | null;
+  cd_mean_abs_delta?: number | null;
+  ld_mean_abs_delta?: number | null;
+  cl_alpha_openvsp?: number | null;
+  cl_alpha_neuralfoil?: number | null;
+  cl_alpha_delta?: number | null;
+  ld_max_openvsp?: number | null;
+  ld_max_neuralfoil?: number | null;
+  ld_max_delta?: number | null;
+  ld_max_aoa_openvsp?: number | null;
+  ld_max_aoa_neuralfoil?: number | null;
+}
+
+export interface GeometrySnapshot {
+  airfoil_requested_label?: string;
+  airfoil_geometry_kind?: string;
+  airfoil_degraded?: boolean;
+  span_m?: number;
+  aspect_ratio?: number;
+  taper_ratio?: number;
+  sweep_deg?: number;
+  dihedral_deg?: number;
+  twist_deg?: number;
+  wingtip_style?: string;
+  solver_wingtip_style?: string;
+  wingtip_degraded?: boolean;
 }
 
 export interface CoefficientFamilyCandidate {
@@ -131,18 +175,27 @@ export interface AnalysisExtraData extends Record<string, unknown> {
   limitation_note?: string;
   solver_airfoil?: Record<string, unknown>;
   solver_wingtip?: Record<string, unknown>;
+  requested_conditions?: AnalysisConditions;
   requested_aoa_range?: AoaRange | null;
   valid_aoa_range?: AoaRange | null;
   curve_filtering?: CurveFilteringInfo;
+  reference_values_used?: ReferenceValuesUsed;
   precision_data?: Record<string, unknown>;
   vspaero_all_data?: Record<string, unknown>;
   solver_scalar_data?: Record<string, unknown>;
+  geometry_snapshot?: GeometrySnapshot;
   selected_coefficient_family?: string;
   selected_coefficient_family_label?: string;
   coefficient_family_selection?: string;
   selected_coefficient_columns?: Record<string, string>;
   coefficient_family_candidates?: Record<string, CoefficientFamilyCandidate>;
   solver_effective_conditions?: SolverEffectiveConditions;
+  comparison_ready?: boolean;
+  comparison_blockers?: string[];
+  comparison_aoa_window?: ComparisonAoaWindow | null;
+  comparison_metrics?: ComparisonMetrics | null;
+  comparison_summary?: string;
+  comparison_counterpart_solver?: SolverId | null;
 }
 
 export interface AnalysisResult {

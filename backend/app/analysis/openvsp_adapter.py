@@ -228,6 +228,10 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             "solver_id": "openvsp",
             "solver_label": "OpenVSP/VSPAERO",
             "solver_mode": "openvsp-script",
+            "limitation_note": (
+                "Potential-flow / thin-surface wing solver output. "
+                "Use only overlapping attached-flow ranges for direct comparison with NeuralFoil."
+            ),
             "solver_bin_dir": str(solver["bin_dir"]),
             "vsp_exe": str(solver["vsp_exe"]),
             "vspaero_exe": str(solver["vspaero_exe"]) if solver["vspaero_exe"] else None,
@@ -330,6 +334,10 @@ def _openvsp_fallback_result(
         "solver_id": "openvsp",
         "solver_label": "OpenVSP/VSPAERO",
         "solver_mode": "surrogate-fallback",
+        "limitation_note": (
+            "Potential-flow / thin-surface wing solver output. "
+            "Fallback results must not be treated as solver-to-solver fair comparisons."
+        ),
         "reason": reason,
         "fallback_reason": reason,
         "params": params,

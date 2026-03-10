@@ -32,6 +32,7 @@ from app.api import _build_export_path, create_app
 from app.geometry.wing_builder import _mock_pressure, build_wing_mesh
 from app.models.state import AnalysisResult, AeroCurve, AirfoilState, AirfoilSummary, AppState, WingParams, get_active_result, set_solver_result
 from app.runtime.native import _reset_native_runtime_for_tests, prepare_native_runtime_dirs
+from app.services.fair_comparison import enrich_state_with_fair_comparison
 from app.services.state_store import SaveManager
 from app.services.state_summary import build_llm_state_summary
 
@@ -813,6 +814,188 @@ class NeuralFoilAnalysisTests(unittest.TestCase):
         self.assertIn(casadi_path, prepared)
         self.assertIn(internal_path, added)
         self.assertIn(casadi_path, added)
+
+
+class FairComparisonTests(unittest.TestCase):
+    def _result(
+        self,
+        *,
+        solver_id: str,
+        aoa: list[float],
+        cl: list[float],
+        cd: list[float],
+        requested_reynolds: float = 70000.0,
+        effective_reynolds: float = 70000.0,
+        valid_range: tuple[float, float] = (-2.0, 4.0),
+        sref: float = 0.064,
+        bref: float = 0.8,
+        cref: float = 0.1,
+        fallback: bool = False,
+    ) -> AnalysisResult:
+        extra_data = {
+            'solver_id': solver_id,
+            'analysis_conditions': {
+                'aoa_start': -2.0,
+                'aoa_end': 4.0,
+                'aoa_step': 2.0,
+                'mach': 0.03,
+                'reynolds': requested_reynolds,
+            },
+            'valid_aoa_range': {'start': valid_range[0], 'end': valid_range[1]},
+            'precision_data': {'sref': sref, 'bref': bref, 'cref': cref},
+            'solver_airfoil': {
+                'requested_label': 'NACA 2412',
+                'geometry_kind': 'coordinates',
+            },
+            'solver_wingtip': {
+                'requested_style': 'straight',
+                'solver_style': 'straight',
+            },
+        }
+        if solver_id == 'openvsp':
+            extra_data.update(
+                {
+                    'selected_coefficient_family': 'wake_far_field',
+                    'selected_coefficient_family_label': 'wake/far-field',
+                    'coefficient_family_candidates': {
+                        'wake_far_field': {
+                            'raw_row_count': len(aoa),
+                            'valid_row_count': len(aoa),
+                        }
+                    },
+                    'solver_effective_conditions': {
+                        'requested_reynolds': requested_reynolds,
+                        're_cref': effective_reynolds,
+                        'reynolds_applied': abs(effective_reynolds - requested_reynolds) <= 500.0,
+                        'mach': 0.03,
+                    },
+                }
+            )
+        else:
+            extra_data.update(
+                {
+                    'used_reynolds': effective_reynolds,
+                    'used_mach': 0.03,
+                }
+            )
+
+        return AnalysisResult(
+            source_label=solver_id,
+            analysis_mode='fallback' if fallback else solver_id,
+            curve=AeroCurve(
+                aoa_deg=aoa,
+                cl=cl,
+                cd=cd,
+                cm=[-0.01 for _ in aoa],
+            ),
+            extra_data=extra_data,
+            notes='',
+        )
+
+    def _paired_state(self) -> AppState:
+        state = AppState()
+        state.analysis.conditions.aoa_start = -2.0
+        state.analysis.conditions.aoa_end = 4.0
+        state.analysis.conditions.aoa_step = 2.0
+        state.analysis.conditions.mach = 0.03
+        state.analysis.conditions.reynolds = 70000.0
+        state.analysis.results.openvsp = self._result(
+            solver_id='openvsp',
+            aoa=[-2.0, 0.0, 2.0, 4.0],
+            cl=[-0.2, 0.1, 0.35, 0.55],
+            cd=[0.02, 0.015, 0.018, 0.024],
+        )
+        state.analysis.results.neuralfoil = self._result(
+            solver_id='neuralfoil',
+            aoa=[-2.0, 0.0, 2.0, 4.0],
+            cl=[-0.18, 0.12, 0.38, 0.58],
+            cd=[0.019, 0.014, 0.017, 0.023],
+        )
+        return state
+
+    def test_fair_comparison_contract_success_case(self) -> None:
+        enriched = enrich_state_with_fair_comparison(self._paired_state())
+        extra = enriched.analysis.results.openvsp.extra_data
+
+        self.assertTrue(extra['comparison_ready'])
+        self.assertEqual(extra['comparison_blockers'], [])
+        self.assertEqual(extra['comparison_aoa_window'], {'start': -2.0, 'end': 4.0, 'point_count': 4})
+        self.assertIn('comparison_metrics', extra)
+        self.assertAlmostEqual(extra['reference_values_used']['sref'], 0.064)
+
+    def test_reynolds_mismatch_blocks_fair_comparison(self) -> None:
+        state = self._paired_state()
+        state.analysis.results.openvsp.extra_data['solver_effective_conditions']['re_cref'] = 10000000.0
+        state.analysis.results.openvsp.extra_data['solver_effective_conditions']['reynolds_applied'] = False
+
+        enriched = enrich_state_with_fair_comparison(state)
+        extra = enriched.analysis.results.openvsp.extra_data
+
+        self.assertFalse(extra['comparison_ready'])
+        self.assertIn('reynolds_mismatch', extra['comparison_blockers'])
+        self.assertNotIn('comparison_metrics', extra)
+
+    def test_no_valid_overlap_blocks_direct_comparison(self) -> None:
+        state = self._paired_state()
+        state.analysis.results.openvsp.extra_data['valid_aoa_range'] = {'start': -2.0, 'end': 0.0}
+        state.analysis.results.neuralfoil.extra_data['valid_aoa_range'] = {'start': 2.0, 'end': 4.0}
+
+        enriched = enrich_state_with_fair_comparison(state)
+        extra = enriched.analysis.results.neuralfoil.extra_data
+
+        self.assertFalse(extra['comparison_ready'])
+        self.assertIn('no_valid_aoa_overlap', extra['comparison_blockers'])
+        self.assertIsNone(extra['comparison_aoa_window'])
+
+    def test_reference_value_mismatch_blocks_comparison(self) -> None:
+        state = self._paired_state()
+        state.analysis.results.neuralfoil.extra_data['precision_data']['cref'] = 0.2
+
+        enriched = enrich_state_with_fair_comparison(state)
+        extra = enriched.analysis.results.openvsp.extra_data
+
+        self.assertFalse(extra['comparison_ready'])
+        self.assertIn('reference_value_mismatch', extra['comparison_blockers'])
+
+    def test_comparison_window_uses_requested_and_valid_overlap(self) -> None:
+        state = self._paired_state()
+        state.analysis.conditions.aoa_start = -10.0
+        state.analysis.conditions.aoa_end = 20.0
+        state.analysis.results.openvsp.extra_data['analysis_conditions'].update({'aoa_start': -10.0, 'aoa_end': 20.0})
+        state.analysis.results.neuralfoil.extra_data['analysis_conditions'].update({'aoa_start': -10.0, 'aoa_end': 20.0})
+        state.analysis.results.openvsp.extra_data['valid_aoa_range'] = {'start': -1.0, 'end': 4.0}
+        state.analysis.results.neuralfoil.extra_data['valid_aoa_range'] = {'start': 0.0, 'end': 10.0}
+        state.analysis.results.openvsp.curve = AeroCurve(
+            aoa_deg=[-1.0, 0.0, 1.0, 2.0, 3.0, 4.0],
+            cl=[-0.05, 0.1, 0.2, 0.3, 0.38, 0.44],
+            cd=[0.016, 0.015, 0.016, 0.017, 0.018, 0.019],
+            cm=[-0.01, -0.01, -0.01, -0.01, -0.01, -0.01],
+        )
+        state.analysis.results.neuralfoil.curve = AeroCurve(
+            aoa_deg=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            cl=[0.12, 0.21, 0.31, 0.4, 0.48, 0.55],
+            cd=[0.014, 0.015, 0.016, 0.017, 0.019, 0.021],
+            cm=[-0.01, -0.01, -0.01, -0.01, -0.01, -0.01],
+        )
+
+        enriched = enrich_state_with_fair_comparison(state)
+        extra = enriched.analysis.results.openvsp.extra_data
+
+        self.assertEqual(extra['comparison_aoa_window'], {'start': 0.0, 'end': 4.0, 'point_count': 5})
+
+    def test_blockers_suppress_direct_comparison_metrics(self) -> None:
+        state = self._paired_state()
+        state.analysis.results.openvsp.extra_data['coefficient_family_candidates']['wake_far_field'] = {
+            'raw_row_count': 10,
+            'valid_row_count': 4,
+        }
+
+        enriched = enrich_state_with_fair_comparison(state)
+        extra = enriched.analysis.results.openvsp.extra_data
+
+        self.assertFalse(extra['comparison_ready'])
+        self.assertIn('coefficient_family_unstable', extra['comparison_blockers'])
+        self.assertNotIn('comparison_metrics', extra)
 
 
 class SaveManagerTests(unittest.TestCase):

@@ -1,6 +1,7 @@
 import type {
   AppState,
-  BackendResponse,
+  SummaryAppState,
+  SummaryBackendResponse,
   CommandEnvelope,
   ExportFormat,
   SaveSnapshotCompareResponse,
@@ -23,14 +24,14 @@ type ExportResponse = {
 };
 
 type Bridge = {
-  getState: () => Promise<AppState>;
+  getState: () => Promise<SummaryAppState>;
   getFullState: () => Promise<AppState>;
-  chat: (req: ChatRequest) => Promise<BackendResponse>;
-  command: (req: { command: CommandEnvelope }) => Promise<BackendResponse>;
-  reset: () => Promise<BackendResponse>;
+  chat: (req: ChatRequest) => Promise<SummaryBackendResponse>;
+  command: (req: { command: CommandEnvelope }) => Promise<SummaryBackendResponse>;
+  reset: () => Promise<SummaryBackendResponse>;
   listSaves: () => Promise<{ saves: SaveSnapshotRecord[] }>;
   saveSnapshot: (req: { name?: string | null }) => Promise<SaveSnapshotRecord>;
-  loadSnapshot: (req: { save_id: string }) => Promise<BackendResponse>;
+  loadSnapshot: (req: { save_id: string }) => Promise<SummaryBackendResponse>;
   compareSnapshots: (req: { left_id: string; right_id: string }) => Promise<SaveSnapshotCompareResponse>;
   exportCfd: (req: { format?: ExportFormat }) => Promise<ExportResponse>;
 };
@@ -82,14 +83,14 @@ async function httpJson<T>(pathname: string, init?: RequestInit): Promise<T> {
 
 function createHttpBridge(): Bridge {
   return {
-    getState: () => httpJson<AppState>('/state/client'),
+    getState: () => httpJson<SummaryAppState>('/state/client'),
     getFullState: () => httpJson<AppState>('/state'),
-    chat: (req) => httpJson<BackendResponse>('/chat', { method: 'POST', body: JSON.stringify(req) }),
-    command: (req) => httpJson<BackendResponse>('/command', { method: 'POST', body: JSON.stringify(req) }),
-    reset: () => httpJson<BackendResponse>('/reset', { method: 'POST' }),
+    chat: (req) => httpJson<SummaryBackendResponse>('/chat', { method: 'POST', body: JSON.stringify(req) }),
+    command: (req) => httpJson<SummaryBackendResponse>('/command', { method: 'POST', body: JSON.stringify(req) }),
+    reset: () => httpJson<SummaryBackendResponse>('/reset', { method: 'POST' }),
     listSaves: () => httpJson<{ saves: SaveSnapshotRecord[] }>('/saves'),
     saveSnapshot: (req) => httpJson<SaveSnapshotRecord>('/saves', { method: 'POST', body: JSON.stringify(req) }),
-    loadSnapshot: (req) => httpJson<BackendResponse>('/saves/load', { method: 'POST', body: JSON.stringify(req) }),
+    loadSnapshot: (req) => httpJson<SummaryBackendResponse>('/saves/load', { method: 'POST', body: JSON.stringify(req) }),
     compareSnapshots: (req) =>
       httpJson<SaveSnapshotCompareResponse>('/saves/compare', { method: 'POST', body: JSON.stringify(req) }),
     exportCfd: (req) => httpJson<ExportResponse>('/export/cfd', { method: 'POST', body: JSON.stringify(req) }),

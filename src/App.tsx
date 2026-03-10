@@ -5,12 +5,15 @@ import Wing3DTab from './tabs/Wing3DTab';
 import AerodynamicsTab from './tabs/AerodynamicsTab';
 import type {
   AnalysisConditions,
+  AnalysisState,
   AppState,
   ExportFormat,
   ProviderId,
   SaveSnapshotCompareResponse,
   SaveSnapshotRecord,
+  SummaryAppState,
   SolverId,
+  WingState,
 } from './types';
 
 type TabId = 'airfoil' | 'wing3d' | 'aero';
@@ -192,7 +195,17 @@ const MODEL_CATALOG_BY_PROVIDER = PROVIDER_ORDER.reduce(
   {} as Record<ProviderId, ModelCard[]>,
 );
 
-function defaultState(): AppState {
+type RefreshOutcome = {
+  summaryError: Error | null;
+  savesError: Error | null;
+};
+
+function toError(err: unknown): Error {
+  if (err instanceof Error) return err;
+  return new Error(String(err));
+}
+
+function defaultSummaryState(): SummaryAppState {
   return {
     airfoil: {
       coords: [],
@@ -219,7 +232,7 @@ function solverCommand(solver: SolverId): 'RunOpenVspAnalysis' | 'RunNeuralFoilA
   return solver === 'neuralfoil' ? 'RunNeuralFoilAnalysis' : 'RunOpenVspAnalysis';
 }
 
-function hasAnyAnalysis(state: AppState): boolean {
+function hasAnyAnalysis(state: Pick<AppState, 'analysis'> | Pick<SummaryAppState, 'analysis'>): boolean {
   return Boolean(state.analysis.results.openvsp || state.analysis.results.neuralfoil);
 }
 
@@ -263,7 +276,7 @@ function readProviderConfig(): Record<ProviderId, ProviderConfig> {
 
 export default function App() {
   const initialProvider = (localStorage.getItem(LS_PROVIDER) as ProviderId) || 'gemini';
-  const [summaryState, setSummaryState] = useState<AppState>(defaultState);
+  const [summaryState, setSummaryState] = useState<SummaryAppState>(defaultSummaryState);
   const [detailState, setDetailState] = useState<AppState | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>('wing3d');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -296,6 +309,7 @@ export default function App() {
 
   const dragRef = useRef<{ active: boolean; startX: number; startW: number }>({ active: false, startX: 0, startW: 320 });
   const chatListRef = useRef<HTMLDivElement | null>(null);
+  const detailRequestRef = useRef<Promise<{ state: AppState | null; error: Error | null }> | null>(null);
 
   const activeModel = useMemo(() => modelById(model, provider), [model, provider]);
   const savesById = useMemo(() => new Map(saves.map((save) => [save.id, save] as const)), [saves]);
@@ -304,8 +318,8 @@ export default function App() {
     () => (selectedSave ? `선택된 저장: ${savesById.get(selectedSave)?.name || selectedSave}` : '저장 기록 없음'),
     [selectedSave, savesById],
   );
-  const wingState = detailState?.wing ?? summaryState.wing;
-  const analysisState = detailState?.analysis ?? summaryState.analysis;
+  const wingState: WingState = detailState?.wing ?? summaryState.wing;
+  const analysisState: AnalysisState = detailState?.analysis ?? summaryState.analysis;
 
   useEffect(() => {
     localStorage.setItem(LS_PROVIDER, provider);
@@ -350,12 +364,17 @@ export default function App() {
   }, [provider, model]);
 
   useEffect(() => {
-    void refreshStateAndSaves();
+    void (async () => {
+      const refresh = await refreshStateAndSaves();
+      if (!refresh.summaryError && tabNeedsDetail(activeTab)) {
+        await refreshDetailState({ clearOnFailure: true });
+      }
+    })();
   }, []);
 
   useEffect(() => {
-    if (!hasLoadedInitialState || !tabNeedsDetail(activeTab) || detailState) return;
-    void refreshDetailState();
+    if (!hasLoadedInitialState || !tabNeedsDetail(activeTab) || detailState || detailRequestRef.current) return;
+    void refreshDetailState({ clearOnFailure: true });
   }, [activeTab, detailState, hasLoadedInitialState]);
 
   useEffect(() => {
@@ -381,38 +400,83 @@ export default function App() {
     };
   }, []);
 
-  async function refreshStateAndSaves() {
-    const includeDetail = tabNeedsDetail(activeTab);
-    const [statePayload, savesPayload, detailPayload] = await Promise.all([
+  async function refreshStateAndSaves(): Promise<RefreshOutcome> {
+    const [summaryResult, savesResult] = await Promise.allSettled([
       bridge.getState(),
       bridge.listSaves(),
-      includeDetail ? bridge.getFullState() : Promise.resolve(null),
     ]);
-    setSummaryState(statePayload);
-    setDetailState(detailPayload);
-    setSaves(savesPayload.saves || []);
-    setHasLoadedInitialState(true);
+
+    const summaryError = summaryResult.status === 'rejected' ? toError(summaryResult.reason) : null;
+    const savesError = savesResult.status === 'rejected' ? toError(savesResult.reason) : null;
+
+    if (summaryResult.status === 'fulfilled') {
+      setSummaryState(summaryResult.value);
+      setHasLoadedInitialState(true);
+      setDetailState(null);
+    } else {
+      console.error('[AUAVWDS] summary-state refresh failed', summaryError);
+    }
+
+    if (savesResult.status === 'fulfilled') {
+      setSaves(savesResult.value.saves || []);
+    } else {
+      console.error('[AUAVWDS] save-list refresh failed', savesError);
+    }
+
+    return {
+      summaryError,
+      savesError,
+    };
   }
 
-  async function refreshDetailState() {
+  async function refreshDetailState(options?: { clearOnFailure?: boolean }): Promise<{ state: AppState | null; error: Error | null }> {
+    if (detailRequestRef.current) {
+      return detailRequestRef.current;
+    }
+
+    const clearOnFailure = options?.clearOnFailure ?? true;
+    const request = (async () => {
+      try {
+        const fullState = await bridge.getFullState();
+        setDetailState(fullState);
+        return { state: fullState, error: null };
+      } catch (err) {
+        const error = toError(err);
+        console.error('[AUAVWDS] full-state refresh failed', error);
+        if (clearOnFailure) {
+          setDetailState(null);
+        }
+        return { state: null, error };
+      } finally {
+        detailRequestRef.current = null;
+      }
+    })();
+
+    detailRequestRef.current = request;
+    return request;
+  }
+
+  async function refreshSaveList(): Promise<Error | null> {
     try {
-      const fullState = await bridge.getFullState();
-      setDetailState(fullState);
-      return fullState;
-    } catch {
-      setDetailState(null);
+      const payload = await bridge.listSaves();
+      setSaves(payload.saves || []);
       return null;
+    } catch (err) {
+      const error = toError(err);
+      console.error('[AUAVWDS] save-list refresh failed', error);
+      return error;
     }
   }
 
-  function applySummaryState(nextState: AppState) {
+  function applySummaryState(nextState: SummaryAppState) {
     setSummaryState(nextState);
     setDetailState(null);
   }
 
   async function syncDetailIfVisible() {
     if (!tabNeedsDetail(activeTab)) return null;
-    return refreshDetailState();
+    const detail = await refreshDetailState({ clearOnFailure: true });
+    return detail.state;
   }
 
   function hasApiKey(p: ProviderId): boolean {
@@ -421,6 +485,26 @@ export default function App() {
 
   function appendAssistantMessage(content: string) {
     setMessages((prev) => [...prev, { role: 'assistant', content }]);
+  }
+
+  async function onRefreshAll() {
+    const refresh = await refreshStateAndSaves();
+    let detailError: Error | null = null;
+
+    if (!refresh.summaryError && tabNeedsDetail(activeTab)) {
+      const detail = await refreshDetailState({ clearOnFailure: true });
+      detailError = detail.error;
+    }
+
+    if (refresh.summaryError) {
+      appendAssistantMessage(`상태 새로고침 실패: ${refresh.summaryError.message}`);
+    }
+    if (refresh.savesError) {
+      appendAssistantMessage(`저장 목록 새로고침 실패: ${refresh.savesError.message}`);
+    }
+    if (!refresh.summaryError && detailError) {
+      appendAssistantMessage(`상세 결과 새로고침 실패: ${detailError.message}`);
+    }
   }
 
   async function sendMessage() {
@@ -465,8 +549,7 @@ export default function App() {
   async function onResetState() {
     try {
       const res = await bridge.reset();
-      setSummaryState(res.state);
-      setDetailState(null);
+      applySummaryState(res.state);
       setMessages([]);
       setCompareSummary('');
     } catch (err: any) {
@@ -481,7 +564,7 @@ export default function App() {
     reflex_percent: number;
   }) {
     setIsApplyingAirfoil(true);
-    let latestState: AppState | null = null;
+    let latestState: SummaryAppState | null = null;
     let backendMutated = false;
     try {
       const rerunSolver = summaryState.analysis.active_solver;
@@ -534,7 +617,10 @@ export default function App() {
       const rec = await bridge.saveSnapshot({ name: saveName || null });
       setSaveName('');
       setSelectedSave(rec.id);
-      await refreshStateAndSaves();
+      const saveListError = await refreshSaveList();
+      if (saveListError) {
+        appendAssistantMessage(`저장 목록 새로고침 실패: ${saveListError.message}`);
+      }
     } catch (err: any) {
       appendAssistantMessage(`저장 실패: ${err?.message || String(err)}`);
     }
@@ -582,7 +668,7 @@ export default function App() {
       const res = await bridge.command({ command: { type: solverCommand(solver), payload: {} } });
       applySummaryState(res.state);
       setActiveTab('aero');
-      await refreshDetailState();
+      await refreshDetailState({ clearOnFailure: true });
       appendAssistantMessage(
         solver === 'neuralfoil'
           ? 'NeuralFoil 기반 날개 추정 해석을 실행했어요.'
@@ -661,7 +747,7 @@ export default function App() {
         >
           저장
         </button>
-        <button className="ghost" onClick={() => void refreshStateAndSaves()}>새로고침</button>
+        <button className="ghost" onClick={() => void onRefreshAll()}>새로고침</button>
       </section>
 
       <div className="main-body">
@@ -857,7 +943,7 @@ export default function App() {
                 </select>
                 <div className="history-actions-row">
                   <button onClick={() => void onLoadSave()}>불러오기</button>
-                  <button className="ghost" onClick={() => void refreshStateAndSaves()}>새로고침</button>
+                  <button className="ghost" onClick={() => void onRefreshAll()}>새로고침</button>
                 </div>
               </div>
             )}

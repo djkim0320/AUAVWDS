@@ -57,6 +57,11 @@ _CLIENT_EXTRA_KEYS = (
     "selected_coefficient_family",
     "selected_coefficient_family_label",
     "coefficient_family_selection",
+    "requested_conditions",
+    "comparison_ready",
+    "comparison_blockers",
+    "comparison_summary",
+    "comparison_counterpart_solver",
     "fallback_reason",
     "reason",
 )
@@ -67,6 +72,10 @@ _CLIENT_NESTED_DICT_KEYS = (
     "solver_effective_conditions",
     "selected_coefficient_columns",
     "coefficient_family_candidates",
+    "reference_values_used",
+    "geometry_snapshot",
+    "comparison_aoa_window",
+    "comparison_metrics",
 )
 
 
@@ -161,6 +170,10 @@ def build_llm_state_summary(state: AppState) -> dict[str, Any]:
         "active_curve_samples": curve_summary["samples"],
         "active_coefficient_family": active.extra_data.get("selected_coefficient_family_label") if active else None,
         "active_solver_effective_conditions": _copy_dict(active.extra_data.get("solver_effective_conditions")) if active else None,
+        "fair_comparison_ready": active.extra_data.get("comparison_ready") if active else None,
+        "fair_comparison_blockers": list(active.extra_data.get("comparison_blockers") or []) if active else None,
+        "fair_comparison_aoa_window": _copy_dict(active.extra_data.get("comparison_aoa_window")) if active else None,
+        "fair_comparison_metrics": _copy_dict(active.extra_data.get("comparison_metrics")) if active else None,
         "precision_data": _copy_dict(active.extra_data.get("precision_data")) if active else None,
         "vspaero_focus_data": _vspaero_focus_data(active.extra_data.get("vspaero_all_data")) if active else None,
     }
