@@ -22,6 +22,38 @@ _ROW_RE = re.compile(
 )
 _NACA4_RE = re.compile(r"(\d{4})")
 
+# VSPAERO .polar files expose both surface-integration and wake/far-field
+# coefficient families. We score both families independently and keep the
+# more physically consistent one as the primary wing-level result.
+_POLAR_FAMILY_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "surface_integration",
+        "label": "surface integration",
+        "selection_columns": {
+            "cl": "cltot",
+            "cd": "cdtot",
+            "cm": "cmytot",
+            "cdo": "cdo",
+            "cdi": "cdi",
+            "ld": "l_d",
+            "e": "e",
+        },
+    },
+    {
+        "id": "wake_far_field",
+        "label": "wake/far-field",
+        "selection_columns": {
+            "cl": "clwtot",
+            "cd": "cdwtot",
+            # VSPAERO exports pitch moment once, so wake-family force
+            # coefficients still share the surface moment column.
+            "cm": "cmytot",
+            "ld": "lodw",
+            "e": "ew",
+        },
+    },
+)
+
 
 def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[str, Any] | None = None) -> AnalysisResult:
     _ = payload or {}
@@ -71,7 +103,15 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                 solver_extra={"solver_airfoil": solver_airfoil},
             )
 
-        case = _build_case_geometry(params.model_dump(), solver_airfoil, aoa_start, aoa_end, aoa_step, mach)
+        case = _build_case_geometry(
+            params.model_dump(),
+            solver_airfoil,
+            aoa_start,
+            aoa_end,
+            aoa_step,
+            mach,
+            reynolds,
+        )
         script_path = run_dir / "run_precision.vspscript"
         script_path.write_text(case["script"], encoding="utf-8")
 
@@ -163,12 +203,24 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
         )
         raw_aoa_all = list(curve_payload["raw_aoa_all"])
 
-        re_used = reynolds if (reynolds is not None and reynolds > 0) else _estimate_reynolds(case["cref"], mach)
+        vspaero_path = run_dir / "auav_case.vspaero"
+        solver_effective_conditions = _extract_solver_effective_conditions(
+            requested_conditions=conditions.model_dump(),
+            vspaero_case_path=vspaero_path,
+            scripted_re_cref=case.get("scripted_re_cref"),
+            fallback_mach=mach,
+        )
+        effective_reynolds = solver_effective_conditions.get("re_cref")
+        re_used = (
+            float(effective_reynolds)
+            if isinstance(effective_reynolds, (int, float)) and float(effective_reynolds) > 0
+            else _estimate_reynolds(case["cref"], mach)
+        )
         metrics = derive_metrics(curve, reynolds=re_used, oswald=_estimate_oswald(params.aspect_ratio, params.sweep_deg, params.taper_ratio))
         precision_data = _build_precision_data(
             curve, metrics, case["sref"], case["cref"], case["bref"], raw_aoa=raw_aoa_all
         )
-        vspaero_all_data = _build_vspaero_all_data_from_rows(curve_payload["summary_rows"])
+        vspaero_all_data = curve_payload.get("vspaero_all_data") or _build_vspaero_all_data_from_rows(curve_payload["summary_rows"])
         vspaero_all_data_raw = curve_payload.get("vspaero_all_data_raw") or {}
         vsp3 = run_dir / "auav_case.vsp3"
 
@@ -189,13 +241,21 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             "curve_filtering": curve_payload["filtering"],
             "requested_aoa_range": curve_payload["filtering"].get("requested_aoa_range"),
             "valid_aoa_range": curve_payload["filtering"].get("used_aoa_range"),
+            "selected_coefficient_family": curve_payload.get("selected_coefficient_family"),
+            "selected_coefficient_family_label": curve_payload.get("selected_coefficient_family_label"),
+            "coefficient_family_selection": curve_payload.get("coefficient_family_selection"),
+            "selected_coefficient_columns": curve_payload.get("selected_coefficient_columns"),
+            "coefficient_family_candidates": curve_payload.get("coefficient_family_candidates"),
             "Sref": case["sref"],
             "Cref": case["cref"],
             "Bref": case["bref"],
             "result_level": "wing_solver",
             "analysis_conditions": conditions.model_dump(),
+            "solver_effective_conditions": solver_effective_conditions,
             "solver_airfoil": case["solver_airfoil"],
             "solver_wingtip": case["solver_wingtip"],
+            "used_reynolds": solver_effective_conditions.get("re_cref"),
+            "used_mach": solver_effective_conditions.get("mach"),
             "precision_data": precision_data,
             "vspaero_all_data": vspaero_all_data,
             "vspaero_all_data_raw": vspaero_all_data_raw,
@@ -204,6 +264,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                 "solver_stdout.log",
                 "solver_stderr.log",
                 "auav_case.polar" if polar_path.exists() else None,
+                "auav_case.vspaero" if vspaero_path.exists() else None,
                 "auav_case.vsp3" if vsp3.exists() else None,
             ],
         }
@@ -223,6 +284,8 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
                 case["solver_airfoil"],
                 curve_filtering=curve_payload["filtering"],
                 solver_wingtip=case["solver_wingtip"],
+                coefficient_family_label=curve_payload.get("selected_coefficient_family_label"),
+                solver_effective_conditions=solver_effective_conditions,
             ),
         )
     except subprocess.TimeoutExpired:
@@ -320,6 +383,7 @@ def _build_case_geometry(
     aoa_end: float,
     aoa_step: float,
     mach: float,
+    reynolds: float | None,
 ) -> dict[str, Any]:
     span = float(params["span_m"])
     ar = float(params["aspect_ratio"])
@@ -339,6 +403,21 @@ def _build_case_geometry(
 
     alpha_npts = max(2, int(round((aoa_end - aoa_start) / max(0.25, aoa_step))) + 1)
     airfoil_script = _build_airfoil_script(solver_airfoil)
+    reynolds_block = ""
+    if reynolds is not None and reynolds > 0:
+        reynolds_block = f"""
+    array< double > reCref;
+    reCref.push_back( {reynolds:.6f} );
+    SetDoubleAnalysisInput( analysis_name, "ReCref", reCref, 0 );
+
+    array< double > reCrefEnd;
+    reCrefEnd.push_back( {reynolds:.6f} );
+    SetDoubleAnalysisInput( analysis_name, "ReCrefEnd", reCrefEnd, 0 );
+
+    array< int > reCrefNpts;
+    reCrefNpts.push_back( 1 );
+    SetIntAnalysisInput( analysis_name, "ReCrefNpts", reCrefNpts, 0 );
+"""
 
     script = f"""void main()
 {{
@@ -410,6 +489,7 @@ def _build_case_geometry(
     array< int > machNpts;
     machNpts.push_back( 1 );
     SetIntAnalysisInput( analysis_name, "MachNpts", machNpts, 0 );
+{reynolds_block}
 
     array< int > wakeIter;
     wakeIter.push_back( 3 );
@@ -430,6 +510,7 @@ def _build_case_geometry(
         "sref": area,
         "cref": mac,
         "bref": span,
+        "scripted_re_cref": float(reynolds) if reynolds is not None and reynolds > 0 else None,
         "solver_airfoil": solver_airfoil,
         "solver_wingtip": {
             "requested_style": requested_wingtip_style,
@@ -562,6 +643,8 @@ def _build_openvsp_notes(
     solver_airfoil: dict[str, Any],
     curve_filtering: dict[str, Any] | None = None,
     solver_wingtip: dict[str, Any] | None = None,
+    coefficient_family_label: str | None = None,
+    solver_effective_conditions: dict[str, Any] | None = None,
 ) -> str:
     requested = str(solver_airfoil.get("requested_label") or "선택한 에어포일")
     geometry_kind = str(solver_airfoil.get("geometry_kind") or "")
@@ -588,6 +671,14 @@ def _build_openvsp_notes(
                 )
             else:
                 suffix += f" 전체 요청 구간을 그대로 결과에 반영했습니다."
+
+    if isinstance(coefficient_family_label, str) and coefficient_family_label.strip():
+        suffix += f" 주 계수 계열은 {coefficient_family_label.strip()}입니다."
+
+    effective = solver_effective_conditions or {}
+    reynolds_note = effective.get("reynolds_note")
+    if isinstance(reynolds_note, str) and reynolds_note.strip():
+        suffix += f" {reynolds_note.strip()}"
 
     if geometry_kind == "custom_file":
         base = f"{requested}의 좌표 파일을 사용해 OpenVSP/VSPAERO 정밀 해석을 완료했습니다."
@@ -616,50 +707,104 @@ def _load_openvsp_curve(
     polar_parsed = _parse_polar_rows(polar_path)
     if polar_parsed is not None:
         headers, rows = polar_parsed
-        payload = _finalize_openvsp_curve_payload(
-            source="polar",
-            rows=_extract_curve_rows_from_polar(headers, rows),
+        payload = _finalize_polar_curve_payload(
+            headers=headers,
+            rows=rows,
             aoa_start=aoa_start,
             aoa_end=aoa_end,
             aoa_step=aoa_step,
-            vspaero_all_data_raw=_build_vspaero_all_data_from_headers_and_rows(headers, rows),
         )
         if payload is not None:
             return payload
 
-    return _finalize_openvsp_curve_payload(
-        source="stdout",
-        rows=_extract_curve_rows_from_stdout(stdout),
-        aoa_start=aoa_start,
-        aoa_end=aoa_end,
-        aoa_step=aoa_step,
-        vspaero_all_data_raw={},
-    )
+    stdout_rows = _extract_curve_rows_from_stdout(stdout)
+    selection = _select_stable_curve_rows(stdout_rows, aoa_step=aoa_step)
+    if len(selection["rows"]) < 3:
+        return None
+
+    filter_meta = dict(selection["filtering"])
+    filter_meta["requested_aoa_range"] = {"start": float(aoa_start), "end": float(aoa_end)}
+    return {
+        "source": "stdout_filtered" if filter_meta.get("dropped_row_count", 0) else "stdout",
+        "curve": _curve_rows_to_curve_payload(
+            selection["rows"],
+            aoa_start=aoa_start,
+            aoa_end=aoa_end,
+            aoa_step=aoa_step,
+        ),
+        "raw_aoa": [float(row["aoa"]) for row in selection["rows"]],
+        "raw_aoa_all": [float(row["aoa"]) for row in stdout_rows],
+        "summary_rows": selection["rows"],
+        "vspaero_all_data": _build_vspaero_all_data_from_rows(selection["rows"]),
+        "vspaero_all_data_raw": {},
+        "filtering": filter_meta,
+        "selected_coefficient_family": "stdout_solver_table",
+        "selected_coefficient_family_label": "solver stdout table",
+        "coefficient_family_selection": "stdout_single_family",
+        "selected_coefficient_columns": {
+            "cl": "CL",
+            "cd": "CD",
+            "cm": "CM",
+            "cdo": "CDo",
+            "cdi": "CDi",
+            "ld": "L/D",
+            "e": "E",
+        },
+        "coefficient_family_candidates": {},
+    }
 
 
-def _finalize_openvsp_curve_payload(
+def _finalize_polar_curve_payload(
     *,
-    source: str,
+    headers: list[str],
     rows: list[dict[str, float]],
     aoa_start: float,
     aoa_end: float,
     aoa_step: float,
-    vspaero_all_data_raw: dict[str, float],
 ) -> dict[str, Any] | None:
-    selected = _select_stable_curve_rows(rows, aoa_step=aoa_step)
-    if selected is None:
+    families = _extract_curve_families_from_polar(headers, rows)
+    evaluations = [
+        _evaluate_curve_family(family, aoa_start=aoa_start, aoa_end=aoa_end, aoa_step=aoa_step)
+        for family in families
+    ]
+    usable = [item for item in evaluations if len(item["selected_rows"]) >= 3]
+    if not usable:
         return None
 
-    curve_rows, filter_meta = selected
+    usable.sort(
+        key=lambda item: (
+            -float(item["score"]),
+            -int(item["filtering"].get("valid_row_count") or 0),
+            -float(item["selected_rows"][-1]["aoa"] - item["selected_rows"][0]["aoa"]),
+        )
+    )
+    chosen = usable[0]
+    filter_meta = dict(chosen["filtering"])
     filter_meta["requested_aoa_range"] = {"start": float(aoa_start), "end": float(aoa_end)}
+    chosen_summary_rows = [chosen["summary_rows"][idx] for idx in chosen["selected_indices"]]
+
     return {
-        "source": f"{source}_filtered" if filter_meta.get("dropped_row_count", 0) else source,
-        "curve": _curve_rows_to_curve_payload(curve_rows, aoa_start=aoa_start, aoa_end=aoa_end, aoa_step=aoa_step),
-        "raw_aoa": [float(row["aoa"]) for row in curve_rows],
-        "raw_aoa_all": [float(row["aoa"]) for row in rows],
-        "summary_rows": curve_rows,
-        "vspaero_all_data_raw": vspaero_all_data_raw,
+        "source": "polar_filtered" if filter_meta.get("dropped_row_count", 0) else "polar",
+        "curve": _curve_rows_to_curve_payload(
+            chosen["selected_rows"],
+            aoa_start=aoa_start,
+            aoa_end=aoa_end,
+            aoa_step=aoa_step,
+        ),
+        "raw_aoa": [float(row["aoa"]) for row in chosen["selected_rows"]],
+        "raw_aoa_all": [float(row["aoa"]) for row in chosen["curve_rows"]],
+        "summary_rows": chosen["selected_rows"],
+        "vspaero_all_data": _build_vspaero_all_data_from_headers_and_rows(chosen["summary_headers"], chosen_summary_rows),
+        "vspaero_all_data_raw": _build_vspaero_all_data_from_headers_and_rows(headers, rows),
         "filtering": filter_meta,
+        "selected_coefficient_family": chosen["id"],
+        "selected_coefficient_family_label": chosen["label"],
+        "coefficient_family_selection": "dynamic_family_selection",
+        "selected_coefficient_columns": chosen["selected_columns"],
+        "coefficient_family_candidates": {
+            item["id"]: _build_curve_family_candidate_summary(item, selected=item["id"] == chosen["id"])
+            for item in evaluations
+        },
     }
 
 
@@ -694,37 +839,79 @@ def _extract_curve_rows_from_stdout(stdout: str) -> list[dict[str, float]]:
     return _normalize_curve_row_sign(rows)
 
 
-def _extract_curve_rows_from_polar(headers: list[str], rows: list[dict[str, float]]) -> list[dict[str, float]]:
+def _extract_curve_families_from_polar(headers: list[str], rows: list[dict[str, float]]) -> list[dict[str, Any]]:
     header_map = {_norm_header_key(h): h for h in headers}
     aoa_key = header_map.get("aoa")
-    cl_key = header_map.get("cltot")
-    cd_key = header_map.get("cdtot")
-    cm_key = header_map.get("cmytot")
-
-    if not aoa_key or not cl_key or not cd_key or not cm_key:
+    if not aoa_key:
         return []
 
-    cdo_key = header_map.get("cdo")
-    cdi_key = header_map.get("cdi")
-    ld_key = header_map.get("l_d")
-    e_key = header_map.get("e")
+    families: list[dict[str, Any]] = []
+    for spec in _POLAR_FAMILY_SPECS:
+        resolved_columns: dict[str, str] = {}
+        missing_required = False
+        for field, normalized_key in spec["selection_columns"].items():
+            raw_key = header_map.get(normalized_key)
+            if raw_key is None and field in {"cl", "cd", "cm"}:
+                missing_required = True
+                break
+            if raw_key is not None:
+                resolved_columns[field] = raw_key
+        if missing_required:
+            continue
 
-    curve_rows: list[dict[str, float]] = []
-    for row in rows:
-        curve_rows.append(
+        curve_rows: list[dict[str, float]] = []
+        for source_row in rows:
+            curve_rows.append(
+                {
+                    "aoa": float(source_row.get(aoa_key, float("nan"))),
+                    "cl": float(source_row.get(resolved_columns["cl"], float("nan"))),
+                    "cd": float(source_row.get(resolved_columns["cd"], float("nan"))),
+                    "cm": float(source_row.get(resolved_columns["cm"], float("nan"))),
+                    "cdo": float(source_row.get(resolved_columns.get("cdo", ""), float("nan"))) if resolved_columns.get("cdo") else float("nan"),
+                    "cdi": float(source_row.get(resolved_columns.get("cdi", ""), float("nan"))) if resolved_columns.get("cdi") else float("nan"),
+                    "ld": float(source_row.get(resolved_columns.get("ld", ""), float("nan"))) if resolved_columns.get("ld") else float("nan"),
+                    "e": float(source_row.get(resolved_columns.get("e", ""), float("nan"))) if resolved_columns.get("e") else float("nan"),
+                }
+            )
+
+        normalized_rows = _normalize_curve_row_sign(curve_rows)
+        summary_headers = [aoa_key]
+        for field in ("cl", "cd", "cm", "cdo", "cdi", "ld", "e"):
+            raw_key = resolved_columns.get(field)
+            if raw_key and raw_key not in summary_headers:
+                summary_headers.append(raw_key)
+
+        summary_rows: list[dict[str, float]] = []
+        for row in normalized_rows:
+            summary_row: dict[str, float] = {aoa_key: float(row["aoa"])}
+            if resolved_columns.get("cl"):
+                summary_row[resolved_columns["cl"]] = float(row["cl"])
+            if resolved_columns.get("cd"):
+                summary_row[resolved_columns["cd"]] = float(row["cd"])
+            if resolved_columns.get("cm"):
+                summary_row[resolved_columns["cm"]] = float(row["cm"])
+            if resolved_columns.get("cdo") and math.isfinite(float(row.get("cdo", float("nan")))):
+                summary_row[resolved_columns["cdo"]] = float(row["cdo"])
+            if resolved_columns.get("cdi") and math.isfinite(float(row.get("cdi", float("nan")))):
+                summary_row[resolved_columns["cdi"]] = float(row["cdi"])
+            if resolved_columns.get("ld") and math.isfinite(float(row.get("ld", float("nan")))):
+                summary_row[resolved_columns["ld"]] = float(row["ld"])
+            if resolved_columns.get("e") and math.isfinite(float(row.get("e", float("nan")))):
+                summary_row[resolved_columns["e"]] = float(row["e"])
+            summary_rows.append(summary_row)
+
+        families.append(
             {
-                "aoa": float(row.get(aoa_key, float("nan"))),
-                "cl": float(row.get(cl_key, float("nan"))),
-                "cd": float(row.get(cd_key, float("nan"))),
-                "cm": float(row.get(cm_key, float("nan"))),
-                "cdo": float(row.get(cdo_key, float("nan"))) if cdo_key else float("nan"),
-                "cdi": float(row.get(cdi_key, float("nan"))) if cdi_key else float("nan"),
-                "ld": float(row.get(ld_key, float("nan"))) if ld_key else float("nan"),
-                "e": float(row.get(e_key, float("nan"))) if e_key else float("nan"),
+                "id": spec["id"],
+                "label": spec["label"],
+                "curve_rows": normalized_rows,
+                "summary_headers": summary_headers,
+                "summary_rows": summary_rows,
+                "selected_columns": {field: raw_key for field, raw_key in resolved_columns.items()},
             }
         )
 
-    return _normalize_curve_row_sign(curve_rows)
+    return families
 
 
 def _normalize_curve_row_sign(rows: list[dict[str, float]]) -> list[dict[str, float]]:
@@ -763,60 +950,92 @@ def _select_stable_curve_rows(
     rows: list[dict[str, float]],
     *,
     aoa_step: float,
-) -> tuple[list[dict[str, float]], dict[str, Any]] | None:
+) -> dict[str, Any]:
+    filtering: dict[str, Any] = {
+        "raw_row_count": len(rows),
+        "plausible_row_count": 0,
+        "valid_row_count": 0,
+        "dropped_row_count": len(rows),
+        "dropped_aoa": [float(row["aoa"]) for row in rows if math.isfinite(float(row.get("aoa", float("nan"))))],
+        "used_aoa_range": None,
+        "exclusion_reason_summary": {},
+    }
     if not rows:
-        return None
+        return {"rows": [], "indices": [], "filtering": filtering}
 
-    valid_rows = [row for row in rows if _is_physically_plausible_curve_row(row)]
-    if len(valid_rows) < 3:
-        return None
+    valid_entries: list[tuple[int, dict[str, float]]] = []
+    reason_counts: dict[str, int] = {}
+    for idx, row in enumerate(rows):
+        reason = _curve_row_rejection_reason(row)
+        if reason is None:
+            valid_entries.append((idx, row))
+            continue
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
 
-    segments: list[list[dict[str, float]]] = []
-    current: list[dict[str, float]] = []
-    max_gap = max(0.26, float(aoa_step) * 1.6)
+    filtering["plausible_row_count"] = len(valid_entries)
+    if len(valid_entries) < 3:
+        filtering["exclusion_reason_summary"] = reason_counts
+        return {"rows": [], "indices": [], "filtering": filtering}
 
-    for row in valid_rows:
+    segments: list[list[tuple[int, dict[str, float]]]] = []
+    current: list[tuple[int, dict[str, float]]] = []
+    max_gap = max(0.26, float(aoa_step) * 2.25)
+
+    for entry in valid_entries:
         if not current:
-            current = [row]
+            current = [entry]
             continue
 
-        prev = current[-1]
+        _, row = entry
+        _, prev = current[-1]
         if abs(float(row["aoa"]) - float(prev["aoa"])) <= max_gap:
-            current.append(row)
+            current.append(entry)
         else:
             segments.append(current)
-            current = [row]
+            current = [entry]
 
     if current:
         segments.append(current)
 
     if not segments:
-        return None
+        filtering["exclusion_reason_summary"] = reason_counts
+        return {"rows": [], "indices": [], "filtering": filtering}
 
     segments.sort(
         key=lambda segment: (
-            not any(abs(float(row["aoa"])) <= max(0.51, float(aoa_step)) for row in segment),
+            not any(abs(float(row["aoa"])) <= max(0.51, float(aoa_step)) for _, row in segment),
             -len(segment),
-            abs(min(float(row["aoa"]) for row in segment)),
+            abs(min(float(row["aoa"]) for _, row in segment)),
         )
     )
     chosen = segments[0]
-    chosen_ids = {id(row) for row in chosen}
-    dropped_aoa = [float(row["aoa"]) for row in rows if id(row) not in chosen_ids]
+    chosen_indices = [idx for idx, _ in chosen]
+    chosen_rows = [rows[idx] for idx in chosen_indices]
+    chosen_index_set = set(chosen_indices)
+    outside_segment = len(valid_entries) - len(chosen)
+    if outside_segment > 0:
+        reason_counts["outside_stable_segment"] = reason_counts.get("outside_stable_segment", 0) + outside_segment
 
-    return chosen, {
-        "raw_row_count": len(rows),
-        "valid_row_count": len(chosen),
-        "dropped_row_count": len(rows) - len(chosen),
-        "dropped_aoa": dropped_aoa,
-        "used_aoa_range": {
-            "start": float(chosen[0]["aoa"]),
-            "end": float(chosen[-1]["aoa"]),
-        },
-    }
+    filtering.update(
+        {
+            "valid_row_count": len(chosen_rows),
+            "dropped_row_count": len(rows) - len(chosen_rows),
+            "dropped_aoa": [
+                float(row["aoa"])
+                for idx, row in enumerate(rows)
+                if idx not in chosen_index_set and math.isfinite(float(row.get("aoa", float("nan"))))
+            ],
+            "used_aoa_range": {
+                "start": float(chosen_rows[0]["aoa"]),
+                "end": float(chosen_rows[-1]["aoa"]),
+            },
+            "exclusion_reason_summary": reason_counts,
+        }
+    )
+    return {"rows": chosen_rows, "indices": chosen_indices, "filtering": filtering}
 
 
-def _is_physically_plausible_curve_row(row: dict[str, float]) -> bool:
+def _curve_row_rejection_reason(row: dict[str, float]) -> str | None:
     aoa = float(row.get("aoa", float("nan")))
     cl = float(row.get("cl", float("nan")))
     cd = float(row.get("cd", float("nan")))
@@ -827,31 +1046,137 @@ def _is_physically_plausible_curve_row(row: dict[str, float]) -> bool:
     e = float(row.get("e", float("nan")))
 
     if not all(math.isfinite(v) for v in (aoa, cl, cd, cm)):
-        return False
+        return "nonfinite"
     if abs(cl) > 3.5:
-        return False
+        return "cl_out_of_range"
     if abs(cm) > 2.5:
-        return False
+        return "cm_out_of_range"
     if cd <= 1e-4:
-        return False
+        return "nonpositive_cd"
     if cd > 1.5:
-        return False
+        return "excessive_cd"
     if math.isfinite(cdo) and cdo > 0.5:
-        return False
+        return "excessive_profile_drag"
     if math.isfinite(cdo) and cdo < -1e-4:
-        return False
+        return "negative_profile_drag"
     if math.isfinite(cdi) and cdi > 1.5:
-        return False
+        return "excessive_induced_drag"
     if math.isfinite(cdi) and cdi < -5e-4:
-        return False
-    if math.isfinite(e) and (e < -1e-6 or e > 2.5):
-        return False
+        return "negative_induced_drag"
+    if math.isfinite(e) and e < -1e-6:
+        return "oswald_out_of_range"
 
     ld_mag = abs(cl / cd) if not math.isfinite(ld) and cd > 0 else abs(ld)
     if math.isfinite(ld_mag) and ld_mag > 120.0:
-        return False
+        return "ld_out_of_range"
 
-    return True
+    return None
+
+
+def _evaluate_curve_family(
+    family: dict[str, Any],
+    *,
+    aoa_start: float,
+    aoa_end: float,
+    aoa_step: float,
+) -> dict[str, Any]:
+    selection = _select_stable_curve_rows(family["curve_rows"], aoa_step=aoa_step)
+    score = _score_curve_family(
+        family["curve_rows"],
+        selection["rows"],
+        filtering=selection["filtering"],
+        aoa_start=aoa_start,
+        aoa_end=aoa_end,
+        aoa_step=aoa_step,
+    )
+    return {
+        "id": family["id"],
+        "label": family["label"],
+        "curve_rows": family["curve_rows"],
+        "summary_rows": family["summary_rows"],
+        "summary_headers": family["summary_headers"],
+        "selected_rows": selection["rows"],
+        "selected_indices": selection["indices"],
+        "selected_columns": family["selected_columns"],
+        "filtering": selection["filtering"],
+        "score": score,
+    }
+
+
+def _score_curve_family(
+    all_rows: list[dict[str, float]],
+    selected_rows: list[dict[str, float]],
+    *,
+    filtering: dict[str, Any],
+    aoa_start: float,
+    aoa_end: float,
+    aoa_step: float,
+) -> float:
+    if len(selected_rows) < 3:
+        return float("-inf")
+
+    used_range = filtering.get("used_aoa_range") or {}
+    span = float(used_range.get("end", selected_rows[-1]["aoa"])) - float(used_range.get("start", selected_rows[0]["aoa"]))
+    requested_mid = (float(aoa_start) + float(aoa_end)) * 0.5
+    used_mid = (float(selected_rows[0]["aoa"]) + float(selected_rows[-1]["aoa"])) * 0.5
+    midpoint_penalty = abs(used_mid - requested_mid)
+    includes_zero = any(abs(float(row["aoa"])) <= max(0.51, float(aoa_step)) for row in selected_rows)
+    reason_counts = filtering.get("exclusion_reason_summary") or {}
+    reversals = _count_cl_slope_reversals(selected_rows)
+
+    score = 0.0
+    score += float(len(selected_rows)) * 12.0
+    score += float(filtering.get("plausible_row_count") or 0) * 1.5
+    score += span * 1.75
+    if includes_zero:
+        score += 8.0
+    score -= midpoint_penalty * 1.25
+    score -= float(reason_counts.get("nonpositive_cd", 0)) * 20.0
+    score -= float(reason_counts.get("negative_profile_drag", 0)) * 8.0
+    score -= float(reason_counts.get("negative_induced_drag", 0)) * 8.0
+    score -= float(reason_counts.get("outside_stable_segment", 0)) * 1.5
+    score -= float(reason_counts.get("excessive_cd", 0)) * 2.5
+    score -= float(reversals) * 4.0
+    score -= max(0.0, float(len(all_rows) - len(selected_rows))) * 0.25
+    return score
+
+
+def _count_cl_slope_reversals(rows: list[dict[str, float]]) -> int:
+    reversals = 0
+    prev_sign = 0
+    for idx in range(1, len(rows)):
+        delta_aoa = float(rows[idx]["aoa"]) - float(rows[idx - 1]["aoa"])
+        if abs(delta_aoa) < 1e-9:
+            continue
+        slope = (float(rows[idx]["cl"]) - float(rows[idx - 1]["cl"])) / delta_aoa
+        if abs(slope) < 1e-9:
+            continue
+        sign = 1 if slope > 0 else -1
+        if prev_sign and sign != prev_sign:
+            reversals += 1
+        prev_sign = sign
+    return reversals
+
+
+def _build_curve_family_candidate_summary(candidate: dict[str, Any], *, selected: bool) -> dict[str, Any]:
+    filtering = candidate["filtering"]
+    summary: dict[str, Any] = {
+        "label": candidate["label"],
+        "available": bool(candidate["curve_rows"]),
+        "selected": selected,
+        "raw_row_count": filtering.get("raw_row_count", 0),
+        "plausible_row_count": filtering.get("plausible_row_count", 0),
+        "valid_row_count": filtering.get("valid_row_count", 0),
+        "dropped_row_count": filtering.get("dropped_row_count", 0),
+        "used_aoa_range": filtering.get("used_aoa_range"),
+        "columns": candidate["selected_columns"],
+    }
+    if candidate["score"] != float("-inf"):
+        summary["score"] = round(float(candidate["score"]), 3)
+    exclusion_summary = filtering.get("exclusion_reason_summary")
+    if isinstance(exclusion_summary, dict) and exclusion_summary:
+        summary["exclusion_reason_summary"] = exclusion_summary
+    return summary
 
 
 def _curve_rows_to_curve_payload(
@@ -987,6 +1312,110 @@ def _build_precision_data(
         "bref": float(bref),
         "reynolds": float(getattr(metrics, "reynolds", 0.0) if metrics else 0.0),
     }
+
+
+def _extract_solver_effective_conditions(
+    *,
+    requested_conditions: dict[str, Any],
+    vspaero_case_path: Path,
+    scripted_re_cref: float | None,
+    fallback_mach: float,
+) -> dict[str, Any]:
+    raw_inputs = _parse_vspaero_case_file(vspaero_case_path)
+    requested_re = requested_conditions.get("reynolds")
+    requested_re_value = float(requested_re) if isinstance(requested_re, (int, float)) and float(requested_re) > 0 else None
+
+    raw_re_cref = raw_inputs.get("ReCref")
+    re_cref = float(raw_re_cref) if isinstance(raw_re_cref, (int, float)) and float(raw_re_cref) > 0 else None
+    if re_cref is None and scripted_re_cref is not None and scripted_re_cref > 0:
+        re_cref = float(scripted_re_cref)
+
+    raw_mach = raw_inputs.get("Mach")
+    mach = float(raw_mach) if isinstance(raw_mach, (int, float)) and math.isfinite(float(raw_mach)) else float(fallback_mach)
+
+    wake_iters_raw = raw_inputs.get("WakeIters")
+    wake_iters = int(round(float(wake_iters_raw))) if isinstance(wake_iters_raw, (int, float)) and math.isfinite(float(wake_iters_raw)) else None
+
+    aoa_values = raw_inputs.get("AoA")
+    aoa_range = None
+    aoa_count = None
+    if isinstance(aoa_values, list):
+        finite_aoa = [float(value) for value in aoa_values if isinstance(value, (int, float)) and math.isfinite(float(value))]
+        if finite_aoa:
+            aoa_range = {"start": float(min(finite_aoa)), "end": float(max(finite_aoa))}
+            aoa_count = len(finite_aoa)
+
+    tolerance = max(5.0, abs(float(requested_re_value or 0.0)) * 0.01)
+    reynolds_applied = bool(
+        requested_re_value is not None
+        and re_cref is not None
+        and abs(float(re_cref) - float(requested_re_value)) <= tolerance
+    )
+
+    if requested_re_value is not None:
+        if reynolds_applied:
+            reynolds_note = f"요청한 Reynolds {requested_re_value:,.0f}를 VSPAERO ReCref에 적용했습니다."
+        elif re_cref is not None:
+            reynolds_note = (
+                f"UI Reynolds {requested_re_value:,.0f}와 달리 VSPAERO가 실제로 사용한 ReCref는 {re_cref:,.0f}입니다."
+            )
+        else:
+            reynolds_note = "UI Reynolds 값은 요청되었지만 VSPAERO 실제 입력 파일에서 ReCref를 확인하지 못했습니다."
+    elif re_cref is not None:
+        reynolds_note = f"UI Reynolds를 지정하지 않아 VSPAERO 입력의 ReCref {re_cref:,.0f}를 사용했습니다."
+    else:
+        reynolds_note = "VSPAERO 실제 Reynolds 입력(ReCref)을 확인하지 못했습니다."
+
+    return {
+        "source": "vspaero_case_file" if raw_inputs else "script_configuration",
+        "requested_reynolds": requested_re_value,
+        "re_cref": re_cref,
+        "reynolds_applied": reynolds_applied,
+        "reynolds_note": reynolds_note,
+        "mach": mach,
+        "wake_iterations": wake_iters,
+        "aoa_range": aoa_range,
+        "aoa_count": aoa_count,
+    }
+
+
+def _parse_vspaero_case_file(vspaero_case_path: Path) -> dict[str, Any]:
+    if not vspaero_case_path.exists():
+        return {}
+
+    try:
+        lines = vspaero_case_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return {}
+
+    parsed: dict[str, Any] = {}
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or "=" not in line:
+            continue
+        key, raw_value = [part.strip() for part in line.split("=", 1)]
+        if not key:
+            continue
+
+        if "," in raw_value:
+            values: list[Any] = []
+            for item in raw_value.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                values.append(_coerce_vspaero_value(item))
+            parsed[key] = values
+        else:
+            parsed[key] = _coerce_vspaero_value(raw_value)
+
+    return parsed
+
+
+def _coerce_vspaero_value(raw: str) -> Any:
+    try:
+        return float(raw)
+    except Exception:
+        return raw
 
 
 def _build_vspaero_all_data_from_rows(rows: list[dict[str, float]]) -> dict[str, float]:

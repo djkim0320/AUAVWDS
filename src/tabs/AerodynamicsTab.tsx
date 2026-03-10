@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import SourceBadge from '../components/SourceBadge';
-import type { AnalysisConditions, AnalysisResult, AnalysisState, SolverId } from '../types';
+import type { AnalysisConditions, AnalysisExtraData, AnalysisResult, AnalysisState, SolverEffectiveConditions, SolverId } from '../types';
 
 const SOLVER_BUTTONS: SolverId[] = ['openvsp', 'neuralfoil'];
 const CHART_STYLE = { width: '100%', height: 250 } as const;
@@ -65,15 +65,19 @@ const BASE_LABELS: Record<string, string> = {
   re_1e6: '레이놀즈수 Re/1e6',
   clo: '양력계수 CLo',
   cli: '유도 양력계수 CLi',
-  cltot: '총 양력계수 CLtot',
+  cltot: '표면 양력계수 CLtot',
+  clwtot: '후류 양력계수 CLwtot',
   cdo: '기생 항력계수 CDo',
   cdi: '유도 항력계수 CDi',
-  cdtot: '총 항력계수 CDtot',
+  cdtot: '표면 항력계수 CDtot',
+  cdwtot: '후류 항력계수 CDwtot',
   cso: '측력계수 CSo',
   csi: '유도 측력계수 CSi',
   cstot: '총 측력계수 CStot',
   l_d: '양항비 L/D',
+  lodw: '후류 양항비 LoDw',
   e: '오스왈드 효율 e',
+  ew: '후류 효율 Ew',
   cmxtot: '롤 모멘트계수 CMx',
   cmytot: '피치 모멘트계수 CMy',
   cmztot: '요 모멘트계수 CMz',
@@ -158,10 +162,18 @@ function AerodynamicsTab({
 
   const provenance = useMemo(() => {
     if (!result) return null;
-    const extra = (result.extra_data || {}) as Record<string, unknown>;
+    const extra = (result.extra_data || {}) as AnalysisExtraData;
     const availableArtifacts = Array.isArray(extra.available_artifacts)
       ? extra.available_artifacts.map(String)
       : [];
+    const filtering = extra.curve_filtering;
+    const selectionRule =
+      extra.coefficient_family_selection === 'dynamic_family_selection'
+        ? '동적 선택'
+        : extra.coefficient_family_selection === 'stdout_single_family'
+          ? 'stdout 단일 표'
+          : '-';
+    const solverEffectiveConditions = (extra.solver_effective_conditions || null) as SolverEffectiveConditions | null;
 
     return {
       solverLabel: String(extra.solver_label || (resultSolver === 'neuralfoil' ? 'NeuralFoil' : 'OpenVSP/VSPAERO')),
@@ -171,14 +183,17 @@ function AerodynamicsTab({
       limitationNote: String(extra.limitation_note || ''),
       availableArtifacts,
       solverAirfoil: extra.solver_airfoil as Record<string, unknown> | undefined,
+      selectedCoefficientFamily: String(extra.selected_coefficient_family_label || extra.selected_coefficient_family || '-'),
+      coefficientSelection: selectionRule,
+      solverEffectiveConditions,
       requestedAoaRange:
         (extra.requested_aoa_range as Record<string, unknown> | undefined) ||
         (extra.analysis_conditions as Record<string, unknown> | undefined) ||
         (analysis.conditions as unknown as Record<string, unknown>),
       validAoaRange:
         (extra.valid_aoa_range as Record<string, unknown> | undefined) ||
-        ((extra.curve_filtering as Record<string, unknown> | undefined)?.used_aoa_range as Record<string, unknown> | undefined),
-      droppedRowCount: toNumber((extra.curve_filtering as Record<string, unknown> | undefined)?.dropped_row_count),
+        (filtering?.used_aoa_range as Record<string, unknown> | undefined),
+      droppedRowCount: toNumber(filtering?.dropped_row_count),
     };
   }, [analysis.conditions, result, resultSolver]);
 
@@ -195,8 +210,8 @@ function AerodynamicsTab({
       return clamp(lift / drag, -200, 200);
     });
 
-    const aoaPlotMin = Math.min(appliedConditions.aoa_start, ...aoa);
-    const aoaPlotMax = Math.max(appliedConditions.aoa_end, ...aoa);
+    const aoaPlotMin = Math.min(...aoa);
+    const aoaPlotMax = Math.max(...aoa);
     const plotIndices = aoa.reduce<number[]>((indices, aoaValue, index) => {
       if (aoaValue >= aoaPlotMin && aoaValue <= aoaPlotMax) {
         indices.push(index);
@@ -217,7 +232,7 @@ function AerodynamicsTab({
       xMin: aoaPlotMin,
       xMax: aoaPlotMax,
     }));
-  }, [appliedConditions.aoa_end, appliedConditions.aoa_start, result]);
+  }, [result]);
 
   const metricCards = useMemo<MetricCardData[]>(() => {
     const metrics = result?.metrics;
@@ -269,10 +284,10 @@ function AerodynamicsTab({
   const vspaeroRows = useMemo(() => {
     if (!result) return [];
 
-    const extra = (result.extra_data || {}) as Record<string, unknown>;
-    const allData = (extra.vspaero_all_data as Record<string, unknown>) || null;
-    const solverScalarData = (extra.solver_scalar_data as Record<string, unknown>) || null;
-    const precisionData = (extra.precision_data as Record<string, unknown>) || null;
+    const extra = (result.extra_data || {}) as AnalysisExtraData;
+    const allData = extra.vspaero_all_data || null;
+    const solverScalarData = extra.solver_scalar_data || null;
+    const precisionData = extra.precision_data || null;
     const metricSource = allData || solverScalarData || precisionData;
     if (!metricSource || typeof metricSource !== 'object') return [];
 
@@ -359,7 +374,11 @@ function AerodynamicsTab({
             <div className="kv"><span>Solver ID</span><strong>{provenance.solverId}</strong></div>
             <div className="kv"><span>결과 수준</span><strong>{provenance.resultLevel}</strong></div>
             <div className="kv"><span>보정 모델</span><strong>{provenance.correctionModel}</strong></div>
+            <div className="kv"><span>계수 계열</span><strong>{provenance.selectedCoefficientFamily}</strong></div>
+            <div className="kv"><span>선택 규칙</span><strong>{provenance.coefficientSelection}</strong></div>
             <div className="kv"><span>에어포일 표현</span><strong>{String(provenance.solverAirfoil?.representation_label || provenance.solverAirfoil?.geometry_kind || '-')}</strong></div>
+            <div className="kv"><span>Solver ReCref</span><strong>{fmtInt(provenance.solverEffectiveConditions?.re_cref ?? null)}</strong></div>
+            <div className="kv"><span>요청 Reynolds</span><strong>{fmtInt(provenance.solverEffectiveConditions?.requested_reynolds ?? null)}</strong></div>
             <div className="kv"><span>요청 해석 범위</span><strong>{fmtAoaRange(provenance.requestedAoaRange)}</strong></div>
             <div className="kv"><span>채택 유효 범위</span><strong>{fmtAoaRange(provenance.validAoaRange)}</strong></div>
             <div className="kv"><span>제외된 행 수</span><strong>{fmtInt(provenance.droppedRowCount)}</strong></div>
@@ -371,6 +390,9 @@ function AerodynamicsTab({
                 ? provenance.availableArtifacts.map((item) => <span key={item} className="metric-chip">{item}</span>)
                 : <span className="muted">기록된 산출물이 없습니다.</span>}
             </div>
+            {provenance.solverEffectiveConditions?.reynolds_note && (
+              <div className="solver-note provenance-note">{provenance.solverEffectiveConditions.reynolds_note}</div>
+            )}
             {provenance.limitationNote && <div className="solver-note provenance-note">{provenance.limitationNote}</div>}
           </div>
         </div>

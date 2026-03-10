@@ -79,13 +79,79 @@ export interface AnalysisConditions {
   reynolds: number | null;
 }
 
+export interface AoaRange {
+  start: number;
+  end: number;
+}
+
+export interface CurveFilteringInfo {
+  raw_row_count?: number;
+  plausible_row_count?: number;
+  valid_row_count?: number;
+  dropped_row_count?: number;
+  dropped_aoa?: number[];
+  used_aoa_range?: AoaRange | null;
+  requested_aoa_range?: AoaRange | null;
+  exclusion_reason_summary?: Record<string, number>;
+}
+
+export interface SolverEffectiveConditions {
+  source?: string;
+  requested_reynolds?: number | null;
+  re_cref?: number | null;
+  reynolds_applied?: boolean;
+  reynolds_note?: string;
+  mach?: number | null;
+  wake_iterations?: number | null;
+  aoa_range?: AoaRange | null;
+  aoa_count?: number | null;
+}
+
+export interface CoefficientFamilyCandidate {
+  label?: string;
+  available?: boolean;
+  selected?: boolean;
+  raw_row_count?: number;
+  plausible_row_count?: number;
+  valid_row_count?: number;
+  dropped_row_count?: number;
+  used_aoa_range?: AoaRange | null;
+  score?: number;
+  columns?: Record<string, string>;
+  exclusion_reason_summary?: Record<string, number>;
+}
+
+export interface AnalysisExtraData extends Record<string, unknown> {
+  available_artifacts?: string[];
+  solver_label?: string;
+  solver_id?: string;
+  result_level?: string;
+  correction_model?: string;
+  wing_correction_model?: string;
+  limitation_note?: string;
+  solver_airfoil?: Record<string, unknown>;
+  solver_wingtip?: Record<string, unknown>;
+  requested_aoa_range?: AoaRange | null;
+  valid_aoa_range?: AoaRange | null;
+  curve_filtering?: CurveFilteringInfo;
+  precision_data?: Record<string, unknown>;
+  vspaero_all_data?: Record<string, unknown>;
+  solver_scalar_data?: Record<string, unknown>;
+  selected_coefficient_family?: string;
+  selected_coefficient_family_label?: string;
+  coefficient_family_selection?: string;
+  selected_coefficient_columns?: Record<string, string>;
+  coefficient_family_candidates?: Record<string, CoefficientFamilyCandidate>;
+  solver_effective_conditions?: SolverEffectiveConditions;
+}
+
 export interface AnalysisResult {
   source_label: string;
   curve: AeroCurve;
   metrics: DerivedMetrics | null;
   analysis_mode: AnalysisMode;
   fallback_reason: string | null;
-  extra_data: Record<string, unknown>;
+  extra_data: AnalysisExtraData;
   notes: string;
   created_at: string;
 }
@@ -108,6 +174,56 @@ export interface AppState {
   history: Record<string, unknown>[];
 }
 
+export interface SummaryAirfoilState {
+  coords: [];
+  upper: [];
+  lower: [];
+  camber: [];
+  summary: AirfoilSummary;
+}
+
+export interface SummaryWingState {
+  params: WingParams;
+  preview_mesh: null;
+  planform_2d: null;
+}
+
+export interface SummaryAeroCurve {
+  aoa_deg: [];
+  cl: [];
+  cd: [];
+  cm: [];
+}
+
+export interface SummaryAnalysisResult {
+  source_label: string;
+  curve: SummaryAeroCurve;
+  metrics: DerivedMetrics | null;
+  analysis_mode: AnalysisMode;
+  fallback_reason: string | null;
+  extra_data: AnalysisExtraData;
+  notes: string;
+  created_at: string;
+}
+
+export interface SummarySolverResults {
+  openvsp: SummaryAnalysisResult | null;
+  neuralfoil: SummaryAnalysisResult | null;
+}
+
+export interface SummaryAnalysisState {
+  results: SummarySolverResults;
+  active_solver: SolverId;
+  conditions: AnalysisConditions;
+}
+
+export interface SummaryAppState {
+  airfoil: SummaryAirfoilState;
+  wing: SummaryWingState;
+  analysis: SummaryAnalysisState;
+  history: [];
+}
+
 export interface CommandEnvelope {
   type:
     | 'SetAirfoil'
@@ -124,13 +240,15 @@ export interface CommandEnvelope {
   payload?: Record<string, unknown>;
 }
 
-export interface BackendResponse {
-  state: AppState;
+export interface BackendResponse<TState = SummaryAppState> {
+  state: TState;
   applied_commands: CommandEnvelope[];
   explanation: string;
   warnings: string[];
   assistant_message?: string;
 }
+
+export type SummaryBackendResponse = BackendResponse<SummaryAppState>;
 
 export interface SaveSnapshotRecord {
   id: string;

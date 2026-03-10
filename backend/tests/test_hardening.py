@@ -14,16 +14,23 @@ from fastapi.testclient import TestClient
 
 
 ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = Path(__file__).resolve().parent / 'fixtures'
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.analysis.common import derive_metrics
 from app.analysis.naca import generate_custom_airfoil, generate_naca4
 from app.analysis.neuralfoil_adapter import run_neuralfoil_analysis
-from app.analysis.openvsp_adapter import run_precision_analysis
+from app.analysis.openvsp_adapter import (
+    _extract_curve_families_from_polar,
+    _extract_solver_effective_conditions,
+    _finalize_polar_curve_payload,
+    _parse_polar_rows,
+    run_precision_analysis,
+)
 from app.api import _build_export_path, create_app
 from app.geometry.wing_builder import _mock_pressure, build_wing_mesh
-from app.models.state import AeroCurve, AirfoilState, AirfoilSummary, AppState, WingParams, get_active_result, set_solver_result
+from app.models.state import AnalysisResult, AeroCurve, AirfoilState, AirfoilSummary, AppState, WingParams, get_active_result, set_solver_result
 from app.runtime.native import _reset_native_runtime_for_tests, prepare_native_runtime_dirs
 from app.services.state_store import SaveManager
 from app.services.state_summary import build_llm_state_summary
@@ -340,6 +347,35 @@ class ApiHardeningTests(unittest.TestCase):
         self.assertIn('precision_data', summary)
         self.assertIn('vspaero_focus_data', summary)
 
+    def test_llm_state_summary_omits_out_of_range_targets_and_marks_nearest_samples_explicitly(self) -> None:
+        state = AppState()
+        set_solver_result(
+            state.analysis,
+            'openvsp',
+            AnalysisResult(
+                source_label='test result',
+                analysis_mode='openvsp',
+                curve=AeroCurve(
+                    aoa_deg=[0.0, 4.0, 8.0],
+                    cl=[0.1, 0.45, 0.8],
+                    cd=[0.01, 0.02, 0.04],
+                    cm=[-0.01, -0.03, -0.05],
+                ),
+                extra_data={},
+                notes='',
+            ),
+        )
+
+        summary = build_llm_state_summary(state)
+        samples = summary['active_curve_samples']
+
+        self.assertEqual(summary['active_curve_range'], {'aoa_min': 0.0, 'aoa_max': 8.0, 'point_count': 3})
+        self.assertEqual([sample['requested_aoa_deg'] for sample in samples], [0.0, 5.0])
+        self.assertEqual(samples[0]['sampled_aoa_deg'], 0.0)
+        self.assertTrue(samples[0]['exact_match'])
+        self.assertEqual(samples[1]['sampled_aoa_deg'], 4.0)
+        self.assertFalse(samples[1]['exact_match'])
+
     def _prepare_mesh(self) -> None:
         set_airfoil = self.client.post('/command', json={'command': {'type': 'SetAirfoil', 'payload': {'code': '2412'}}})
         self.assertEqual(set_airfoil.status_code, 200)
@@ -579,6 +615,104 @@ class PrecisionAnalysisTests(unittest.TestCase):
         self.assertLess(result.curve.cl[0], result.curve.cl[-1])
         self.assertAlmostEqual(result.curve.cl[0], -0.36, places=2)
         self.assertAlmostEqual(result.curve.cl[-1], 0.34, places=2)
+
+    def test_polar_parser_retains_surface_and_wake_families_for_regression_fixture(self) -> None:
+        parsed = _parse_polar_rows(FIXTURES / 'openvsp' / 'auav_case.polar')
+        self.assertIsNotNone(parsed)
+        headers, rows = parsed or ([], [])
+
+        families = {item['id']: item for item in _extract_curve_families_from_polar(headers, rows)}
+
+        self.assertIn('surface_integration', families)
+        self.assertIn('wake_far_field', families)
+        self.assertEqual(len(families['surface_integration']['curve_rows']), 31)
+        self.assertEqual(len(families['wake_far_field']['curve_rows']), 31)
+
+    def test_dynamic_family_selection_prefers_wake_family_for_regression_fixture(self) -> None:
+        parsed = _parse_polar_rows(FIXTURES / 'openvsp' / 'auav_case.polar')
+        self.assertIsNotNone(parsed)
+        headers, rows = parsed or ([], [])
+
+        payload = _finalize_polar_curve_payload(
+            headers=headers,
+            rows=rows,
+            aoa_start=-10.0,
+            aoa_end=20.0,
+            aoa_step=1.0,
+        )
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload['selected_coefficient_family'], 'wake_far_field')
+        self.assertEqual(payload['selected_coefficient_family_label'], 'wake/far-field')
+        self.assertEqual(payload['coefficient_family_selection'], 'dynamic_family_selection')
+        self.assertEqual(payload['filtering']['used_aoa_range'], {'start': -10.0, 'end': 20.0})
+        self.assertEqual(payload['coefficient_family_candidates']['wake_far_field']['selected'], True)
+        self.assertGreater(payload['coefficient_family_candidates']['surface_integration']['dropped_row_count'], 0)
+        self.assertIn('nonpositive_cd', payload['coefficient_family_candidates']['surface_integration']['exclusion_reason_summary'])
+        self.assertIn('cdwtot_min', payload['vspaero_all_data'])
+        self.assertNotIn('cdtot_min', payload['vspaero_all_data'])
+
+    def test_solver_effective_conditions_report_reynolds_mismatch_from_vspaero_fixture(self) -> None:
+        effective = _extract_solver_effective_conditions(
+            requested_conditions={'reynolds': 70000.0},
+            vspaero_case_path=FIXTURES / 'openvsp' / 'auav_case.vspaero',
+            scripted_re_cref=None,
+            fallback_mach=0.03,
+        )
+
+        self.assertEqual(effective['re_cref'], 10000000.0)
+        self.assertFalse(effective['reynolds_applied'])
+        self.assertEqual(effective['aoa_range'], {'start': -10.0, 'end': 20.0})
+        self.assertIn('ReCref는 10,000,000', effective['reynolds_note'])
+
+    def test_run_precision_applies_requested_reynolds_and_uses_selected_wake_family(self) -> None:
+        state = AppState(airfoil=AirfoilState.model_validate(generate_naca4('3408')))
+        state.analysis.conditions.aoa_start = -10.0
+        state.analysis.conditions.aoa_end = 20.0
+        state.analysis.conditions.aoa_step = 1.0
+        state.analysis.conditions.mach = 0.03
+        state.analysis.conditions.reynolds = 70000.0
+
+        fixture_polar = (FIXTURES / 'openvsp' / 'auav_case.polar').read_text(encoding='utf-8')
+        fixture_vspaero = (FIXTURES / 'openvsp' / 'auav_case.vspaero').read_text(encoding='utf-8').replace(
+            'ReCref = 10000000.000000',
+            'ReCref = 70000.000000',
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            solver_dir = work_dir / 'solver_bin'
+            solver_dir.mkdir(parents=True, exist_ok=True)
+            vsp_exe = solver_dir / 'vsp.exe'
+            vspaero_exe = solver_dir / 'vspaero.exe'
+            vsp_exe.write_text('', encoding='utf-8')
+            vspaero_exe.write_text('', encoding='utf-8')
+            captured: dict[str, str] = {}
+
+            def fake_subprocess_run(cmd, cwd, **kwargs):
+                captured['script'] = Path(cwd, 'run_precision.vspscript').read_text(encoding='utf-8')
+                Path(cwd, 'auav_case.vsp3').write_text('vsp3', encoding='utf-8')
+                Path(cwd, 'auav_case.polar').write_text(fixture_polar, encoding='utf-8')
+                Path(cwd, 'auav_case.vspaero').write_text(fixture_vspaero, encoding='utf-8')
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+            with (
+                patch(
+                    'app.analysis.openvsp_adapter._resolve_solver_paths',
+                    return_value={'bin_dir': solver_dir, 'vsp_exe': vsp_exe, 'vspaero_exe': vspaero_exe},
+                ),
+                patch('app.analysis.openvsp_adapter.subprocess.run', side_effect=fake_subprocess_run),
+            ):
+                result = run_precision_analysis(state, work_dir / 'real')
+
+        self.assertIn('SetDoubleAnalysisInput( analysis_name, "ReCref"', captured['script'])
+        self.assertIn('70000.000000', captured['script'])
+        self.assertEqual(result.extra_data['selected_coefficient_family'], 'wake_far_field')
+        self.assertEqual(result.extra_data['valid_aoa_range'], {'start': -10.0, 'end': 20.0})
+        self.assertEqual(result.extra_data['solver_effective_conditions']['re_cref'], 70000.0)
+        self.assertTrue(result.extra_data['solver_effective_conditions']['reynolds_applied'])
+        self.assertGreater(result.metrics.ld_max, 20.0)
+        self.assertLess(result.metrics.cd_min, 0.02)
 
 
 class NeuralFoilAnalysisTests(unittest.TestCase):

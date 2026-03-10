@@ -11,6 +11,7 @@ AUAVWDS는 Windows 10/11용 Electron + FastAPI 기반 날개 설계 앱입니다
   - `NeuralFoil`: 2D airfoil polar + 명시적 finite-wing correction 기반 날개 추정 해석
 - 공통 해석 조건 편집
   - AoA 시작/종료/간격, Mach, Reynolds를 UI와 상태에서 함께 관리합니다.
+  - OpenVSP/VSPAERO는 지원되는 경우 UI Reynolds를 `ReCref`로 실제 solver 입력에 반영하고, 결과 메타데이터에 solver-effective 조건을 함께 기록합니다.
 - 저장 히스토리
   - 현재 상태 저장, 불러오기, 두 스냅샷 비교를 지원합니다.
 - CFD/연구용 내보내기
@@ -26,7 +27,8 @@ AUAVWDS는 Windows 10/11용 Electron + FastAPI 기반 날개 설계 앱입니다
 - 실제 OpenVSP 스크립트를 생성해 `vsp.exe -script`로 실행합니다.
 - solver 실행 결과는 `analysis.results.openvsp`에 저장됩니다.
 - `VSP3` 파일은 이 경로에서만 생성됩니다.
-- solver provenance, 산출물 경로, fallback 사유를 메타데이터에 남깁니다.
+- `.polar`에 surface-integration 계열과 wake/far-field 계열이 함께 있으면, 두 계열을 모두 파싱한 뒤 물리 일관성과 유효 AoA 구간을 기준으로 주 계열을 동적으로 선택합니다.
+- solver provenance, 산출물 경로, fallback 사유, 선택된 계수 계열, solver-effective 조건을 메타데이터에 남깁니다.
 
 ### 2. NeuralFoil
 - airfoil 좌표를 직접 사용해 NeuralFoil 2D 해석을 수행합니다.

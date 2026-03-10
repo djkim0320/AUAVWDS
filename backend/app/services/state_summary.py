@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.models.state import AnalysisResult, AppState, get_active_result
+from pydantic import BaseModel, Field
+
+from app.models.state import (
+    AnalysisConditions,
+    AnalysisMode,
+    AnalysisResult,
+    AppState,
+    AirfoilSummary,
+    DerivedMetrics,
+    SolverId,
+    WingParams,
+    get_active_result,
+)
 
 
 _CURVE_SAMPLE_AOA = (-10.0, -5.0, 0.0, 5.0, 10.0, 15.0, 20.0)
@@ -42,6 +54,9 @@ _CLIENT_EXTRA_KEYS = (
     "row_count_raw",
     "requested_aoa_range",
     "valid_aoa_range",
+    "selected_coefficient_family",
+    "selected_coefficient_family_label",
+    "coefficient_family_selection",
     "fallback_reason",
     "reason",
 )
@@ -49,33 +64,76 @@ _CLIENT_NESTED_DICT_KEYS = (
     "precision_data",
     "vspaero_all_data",
     "solver_scalar_data",
+    "solver_effective_conditions",
+    "selected_coefficient_columns",
+    "coefficient_family_candidates",
 )
 
 
-def serialize_client_state(state: AppState) -> dict[str, Any]:
-    return {
-        "airfoil": {
-            "coords": [],
-            "upper": [],
-            "lower": [],
-            "camber": [],
-            "summary": state.airfoil.summary.model_dump(),
-        },
-        "wing": {
-            "params": state.wing.params.model_dump(),
-            "preview_mesh": None,
-            "planform_2d": None,
-        },
-        "analysis": {
-            "results": {
-                "openvsp": _serialize_analysis_result(state.analysis.results.openvsp),
-                "neuralfoil": _serialize_analysis_result(state.analysis.results.neuralfoil),
-            },
-            "active_solver": state.analysis.active_solver,
-            "conditions": state.analysis.conditions.model_dump(),
-        },
-        "history": [],
-    }
+class ClientAirfoilState(BaseModel):
+    coords: list[list[float]] = Field(default_factory=list)
+    upper: list[list[float]] = Field(default_factory=list)
+    lower: list[list[float]] = Field(default_factory=list)
+    camber: list[list[float]] = Field(default_factory=list)
+    summary: AirfoilSummary = Field(default_factory=AirfoilSummary)
+
+
+class ClientWingState(BaseModel):
+    params: WingParams = Field(default_factory=WingParams)
+    preview_mesh: None = None
+    planform_2d: None = None
+
+
+class ClientAeroCurve(BaseModel):
+    aoa_deg: list[float] = Field(default_factory=list)
+    cl: list[float] = Field(default_factory=list)
+    cd: list[float] = Field(default_factory=list)
+    cm: list[float] = Field(default_factory=list)
+
+
+class ClientAnalysisResult(BaseModel):
+    source_label: str
+    curve: ClientAeroCurve = Field(default_factory=ClientAeroCurve)
+    metrics: DerivedMetrics | None = None
+    analysis_mode: AnalysisMode = 'fallback'
+    fallback_reason: str | None = None
+    extra_data: dict[str, Any] = Field(default_factory=dict)
+    notes: str = ''
+    created_at: str
+
+
+class ClientSolverResults(BaseModel):
+    openvsp: ClientAnalysisResult | None = None
+    neuralfoil: ClientAnalysisResult | None = None
+
+
+class ClientAnalysisState(BaseModel):
+    results: ClientSolverResults = Field(default_factory=ClientSolverResults)
+    active_solver: SolverId = 'openvsp'
+    conditions: AnalysisConditions = Field(default_factory=AnalysisConditions)
+
+
+class ClientAppState(BaseModel):
+    airfoil: ClientAirfoilState = Field(default_factory=ClientAirfoilState)
+    wing: ClientWingState = Field(default_factory=ClientWingState)
+    analysis: ClientAnalysisState = Field(default_factory=ClientAnalysisState)
+    history: list[dict[str, Any]] = Field(default_factory=list)
+
+
+def serialize_client_state(state: AppState) -> ClientAppState:
+    return ClientAppState(
+        airfoil=ClientAirfoilState(summary=state.airfoil.summary.model_copy(deep=True)),
+        wing=ClientWingState(params=state.wing.params.model_copy(deep=True)),
+        analysis=ClientAnalysisState(
+            results=ClientSolverResults(
+                openvsp=_serialize_analysis_result(state.analysis.results.openvsp),
+                neuralfoil=_serialize_analysis_result(state.analysis.results.neuralfoil),
+            ),
+            active_solver=state.analysis.active_solver,
+            conditions=state.analysis.conditions.model_copy(deep=True),
+        ),
+        history=[],
+    )
 
 
 def build_llm_state_summary(state: AppState) -> dict[str, Any]:
@@ -101,24 +159,26 @@ def build_llm_state_summary(state: AppState) -> dict[str, Any]:
         "active_metrics": active.metrics.model_dump() if active and active.metrics else None,
         "active_curve_range": curve_summary["range"],
         "active_curve_samples": curve_summary["samples"],
+        "active_coefficient_family": active.extra_data.get("selected_coefficient_family_label") if active else None,
+        "active_solver_effective_conditions": _copy_dict(active.extra_data.get("solver_effective_conditions")) if active else None,
         "precision_data": _copy_dict(active.extra_data.get("precision_data")) if active else None,
         "vspaero_focus_data": _vspaero_focus_data(active.extra_data.get("vspaero_all_data")) if active else None,
     }
 
-def _serialize_analysis_result(result: AnalysisResult | None) -> dict[str, Any] | None:
+def _serialize_analysis_result(result: AnalysisResult | None) -> ClientAnalysisResult | None:
     if result is None:
         return None
 
-    return {
-        "source_label": result.source_label,
-        "curve": _empty_curve_payload(),
-        "metrics": result.metrics.model_dump() if result.metrics else None,
-        "analysis_mode": result.analysis_mode,
-        "fallback_reason": result.fallback_reason,
-        "extra_data": _serialize_client_extra_data(result.extra_data or {}),
-        "notes": result.notes,
-        "created_at": result.created_at,
-    }
+    return ClientAnalysisResult(
+        source_label=result.source_label,
+        curve=_empty_curve_payload(),
+        metrics=result.metrics.model_copy(deep=True) if result.metrics else None,
+        analysis_mode=result.analysis_mode,
+        fallback_reason=result.fallback_reason,
+        extra_data=_serialize_client_extra_data(result.extra_data or {}),
+        notes=result.notes,
+        created_at=result.created_at,
+    )
 
 
 def _serialize_client_extra_data(extra: dict[str, Any]) -> dict[str, Any]:
@@ -140,7 +200,16 @@ def _serialize_client_extra_data(extra: dict[str, Any]) -> dict[str, Any]:
     if isinstance(filtering, dict):
         out["curve_filtering"] = {
             key: filtering[key]
-            for key in ("raw_row_count", "valid_row_count", "dropped_row_count", "dropped_aoa", "used_aoa_range", "requested_aoa_range")
+            for key in (
+                "raw_row_count",
+                "plausible_row_count",
+                "valid_row_count",
+                "dropped_row_count",
+                "dropped_aoa",
+                "used_aoa_range",
+                "requested_aoa_range",
+                "exclusion_reason_summary",
+            )
             if key in filtering
         }
 
@@ -165,26 +234,39 @@ def _curve_summary(result: AnalysisResult | None) -> dict[str, Any]:
     if not (aoa and cl and cd and cm):
         return {"range": None, "samples": None}
 
-    samples: dict[str, dict[str, float]] = {}
+    aoa_min = float(min(aoa))
+    aoa_max = float(max(aoa))
+    used_indices: set[int] = set()
+    samples: list[dict[str, float | bool]] = []
     for target_aoa in _CURVE_SAMPLE_AOA:
+        if target_aoa < aoa_min or target_aoa > aoa_max:
+            continue
+
         idx = min(range(len(aoa)), key=lambda i: abs(aoa[i] - target_aoa))
+        if idx in used_indices:
+            continue
+        used_indices.add(idx)
+
+        sampled_aoa = float(aoa[idx])
         cd_i = cd[idx]
         ld_i = (cl[idx] / cd_i) if abs(cd_i) > 1e-9 else 0.0
-        samples[f"{target_aoa:.0f}"] = {
-            "aoa_deg": float(aoa[idx]),
+        samples.append({
+            "requested_aoa_deg": float(target_aoa),
+            "sampled_aoa_deg": sampled_aoa,
+            "exact_match": abs(sampled_aoa - float(target_aoa)) < 1e-9,
             "cl": float(cl[idx]),
             "cd": float(cd[idx]),
             "cm": float(cm[idx]),
             "ld": float(ld_i),
-        }
+        })
 
     return {
         "range": {
-            "aoa_min": float(min(aoa)),
-            "aoa_max": float(max(aoa)),
+            "aoa_min": aoa_min,
+            "aoa_max": aoa_max,
             "point_count": len(aoa),
         },
-        "samples": samples,
+        "samples": samples or None,
     }
 
 
@@ -204,10 +286,5 @@ def _copy_dict(value: Any) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, dict) else None
 
 
-def _empty_curve_payload() -> dict[str, list[float]]:
-    return {
-        "aoa_deg": [],
-        "cl": [],
-        "cd": [],
-        "cm": [],
-    }
+def _empty_curve_payload() -> ClientAeroCurve:
+    return ClientAeroCurve()
