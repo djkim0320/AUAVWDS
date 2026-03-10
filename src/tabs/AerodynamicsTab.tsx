@@ -1,7 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import SourceBadge from '../components/SourceBadge';
 import type { AnalysisConditions, AnalysisResult, AnalysisState, SolverId } from '../types';
+
+const SOLVER_BUTTONS: SolverId[] = ['openvsp', 'neuralfoil'];
+const CHART_STYLE = { width: '100%', height: 250 } as const;
+const CHART_CONFIGS = [
+  { key: 'cl', title: '양력계수 (CL)', color: '#70bbff', yName: 'CL' },
+  { key: 'ld', title: '양항비 (L/D)', color: '#efb35b', yName: 'L/D' },
+  { key: 'cd', title: '항력계수 (CD)', color: '#6ce8be', yName: 'CD' },
+] as const;
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, v));
@@ -109,7 +117,30 @@ type Props = {
   isUpdatingConditions: boolean;
 };
 
-export default function AerodynamicsTab({
+type ChartSeries = {
+  key: string;
+  title: string;
+  color: string;
+  yName: string;
+  x: number[];
+  y: number[];
+  xMin: number;
+  xMax: number;
+};
+
+type MetricCardData = {
+  title: string;
+  value: string;
+  desc: string;
+  emphasize?: boolean;
+};
+
+type DetailSectionData = {
+  title: string;
+  rows: Array<{ label: string; value: string }>;
+};
+
+function AerodynamicsTab({
   analysis,
   onRunAnalysis,
   onSelectSolver,
@@ -117,7 +148,7 @@ export default function AerodynamicsTab({
   isRunningAnalysis,
   isUpdatingConditions,
 }: Props) {
-  const { solver: resultSolver, result } = preferredResult(analysis);
+  const { solver: resultSolver, result } = useMemo(() => preferredResult(analysis), [analysis]);
   const [draft, setDraft] = useState<AnalysisConditions>(analysis.conditions);
   const appliedConditions = analysis.conditions;
 
@@ -130,14 +161,7 @@ export default function AerodynamicsTab({
     const extra = (result.extra_data || {}) as Record<string, unknown>;
     const availableArtifacts = Array.isArray(extra.available_artifacts)
       ? extra.available_artifacts.map(String)
-      : [
-          typeof extra.script_path === 'string' ? 'run_precision.vspscript' : null,
-          typeof extra.stdout_log === 'string' ? 'solver_stdout.log' : null,
-          typeof extra.stderr_log === 'string' ? 'solver_stderr.log' : null,
-          typeof extra.outputs_path === 'string' ? 'outputs.json' : null,
-          typeof extra.processed_result_path === 'string' ? 'processed_result.json' : null,
-          typeof extra.vsp3_path === 'string' ? 'auav_case.vsp3' : null,
-        ].filter(Boolean);
+      : [];
 
     return {
       solverLabel: String(extra.solver_label || (resultSolver === 'neuralfoil' ? 'NeuralFoil' : 'OpenVSP/VSPAERO')),
@@ -157,6 +181,110 @@ export default function AerodynamicsTab({
       droppedRowCount: toNumber((extra.curve_filtering as Record<string, unknown> | undefined)?.dropped_row_count),
     };
   }, [analysis.conditions, result, resultSolver]);
+
+  const chartSeries = useMemo<ChartSeries[]>(() => {
+    if (!result) return [];
+
+    const curve = result.curve;
+    const aoa = curve.aoa_deg;
+    if (!aoa.length) return [];
+
+    const ld = curve.cl.map((lift, index) => {
+      const drag = curve.cd[index] || 0;
+      if (Math.abs(drag) < 1e-6) return 0;
+      return clamp(lift / drag, -200, 200);
+    });
+
+    const aoaPlotMin = Math.min(appliedConditions.aoa_start, ...aoa);
+    const aoaPlotMax = Math.max(appliedConditions.aoa_end, ...aoa);
+    const plotIndices = aoa.reduce<number[]>((indices, aoaValue, index) => {
+      if (aoaValue >= aoaPlotMin && aoaValue <= aoaPlotMax) {
+        indices.push(index);
+      }
+      return indices;
+    }, []);
+    const x = plotIndices.map((index) => aoa[index]);
+    const chartValues = {
+      cl: plotIndices.map((index) => curve.cl[index]),
+      cd: plotIndices.map((index) => curve.cd[index]),
+      ld: plotIndices.map((index) => clamp(ld[index], -200, 200)),
+    };
+
+    return CHART_CONFIGS.map((config) => ({
+      ...config,
+      x,
+      y: chartValues[config.key],
+      xMin: aoaPlotMin,
+      xMax: aoaPlotMax,
+    }));
+  }, [appliedConditions.aoa_end, appliedConditions.aoa_start, result]);
+
+  const metricCards = useMemo<MetricCardData[]>(() => {
+    const metrics = result?.metrics;
+    return [
+      { title: '최대 양항비 (L/D)', value: fmt(metrics?.ld_max, 1), desc: '높을수록 효율적입니다.', emphasize: true },
+      { title: '최적 받음각', value: `${fmt(metrics?.ld_max_aoa, 1)}도`, desc: 'L/D가 최대인 지점' },
+      { title: '최대 양력 각도', value: `${fmt(metrics?.cl_max_aoa, 1)}도`, desc: 'CL이 최대인 지점' },
+      { title: '최대 CL', value: fmt(metrics?.cl_max, 3), desc: '최대 양력계수' },
+    ];
+  }, [result]);
+
+  const chips = useMemo(() => {
+    const metrics = result?.metrics;
+    return [
+      { key: 'CD 최소', value: fmt(metrics?.cd_min, 4) },
+      { key: '체공 지표 (CL^(3/2)/CD)', value: fmt(metrics?.endurance_param, 1) },
+      { key: 'Oswald e', value: fmt(metrics?.oswald_e, 2) },
+      { key: 'Re', value: fmtInt(metrics?.reynolds) },
+    ];
+  }, [result]);
+
+  const detailSections = useMemo<DetailSectionData[]>(() => {
+    const metrics = result?.metrics;
+    return [
+      {
+        title: '양력 특성',
+        rows: [
+          { label: '양력 곡선 기울기 (CL_alpha)', value: `${fmt(metrics?.cl_alpha, 2)} /rad` },
+          { label: '영양력 받음각', value: `${fmt(metrics?.alpha_zero_lift, 2)}도` },
+        ],
+      },
+      {
+        title: '안정성 / 모멘트',
+        rows: [
+          { label: '영양력 조건 Cm', value: fmt(metrics?.cm_zero_lift, 5) },
+          { label: 'Cm 기울기 (Cm_alpha)', value: `${fmt(metrics?.cm_alpha, 4)} /rad` },
+        ],
+      },
+      {
+        title: '항력 특성',
+        rows: [
+          { label: '영양력 항력 (CD0)', value: fmt(metrics?.cd_zero, 4) },
+          { label: '유도 항력 효율 (e)', value: fmt(metrics?.oswald_e, 3) },
+        ],
+      },
+    ];
+  }, [result]);
+
+  const vspaeroRows = useMemo(() => {
+    if (!result) return [];
+
+    const extra = (result.extra_data || {}) as Record<string, unknown>;
+    const allData = (extra.vspaero_all_data as Record<string, unknown>) || null;
+    const solverScalarData = (extra.solver_scalar_data as Record<string, unknown>) || null;
+    const precisionData = (extra.precision_data as Record<string, unknown>) || null;
+    const metricSource = allData || solverScalarData || precisionData;
+    if (!metricSource || typeof metricSource !== 'object') return [];
+
+    return Object.entries(metricSource)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .flatMap(([key, value]) => {
+        const numericValue = toNumber(value);
+        if (numericValue === null) return [];
+        const digits = Math.abs(numericValue) < 1 ? 5 : 4;
+        return [{ key, label: humanizeVspaeroKey(key), value: fmt(numericValue, digits) }];
+      });
+  }, [result]);
 
   if (!result) {
     return (
@@ -180,51 +308,6 @@ export default function AerodynamicsTab({
     );
   }
 
-  const c = result.curve;
-  const m = result.metrics;
-  const aoa = c.aoa_deg;
-  const ld = c.cl.map((v, i) => {
-    const cd = c.cd[i] || 0;
-    if (Math.abs(cd) < 1e-6) return 0;
-    return clamp(v / cd, -200, 200);
-  });
-
-  const aoaPlotMin = Math.min(appliedConditions.aoa_start, Math.min(...aoa));
-  const aoaPlotMax = Math.max(appliedConditions.aoa_end, Math.max(...aoa));
-  const plotIndices = aoa
-    .map((a, idx) => (a >= aoaPlotMin && a <= aoaPlotMax ? idx : -1))
-    .filter((idx) => idx >= 0);
-  const aoaPlot = plotIndices.map((i) => aoa[i]);
-  const clPlot = plotIndices.map((i) => c.cl[i]);
-  const cdPlot = plotIndices.map((i) => c.cd[i]);
-  const ldPlot = plotIndices.map((i) => clamp(ld[i], -200, 200));
-
-  const chips = [
-    { k: 'CD 최소', v: fmt(m?.cd_min, 4) },
-    { k: '체공 지표 (CL^(3/2)/CD)', v: fmt(m?.endurance_param, 1) },
-    { k: 'Oswald e', v: fmt(m?.oswald_e, 2) },
-    { k: 'Re', v: fmtInt(m?.reynolds) },
-  ];
-
-  const precisionData = (result.extra_data?.precision_data as Record<string, unknown>) || null;
-  const allData = (result.extra_data?.vspaero_all_data as Record<string, unknown>) || null;
-  const rawNeuralFoil = (result.extra_data?.raw_neuralfoil_output as Record<string, unknown>) || null;
-  const vspaeroRows: Array<{ key: string; label: string; value: string }> = [];
-  const metricSource = allData || rawNeuralFoil || precisionData;
-
-  if (metricSource && typeof metricSource === 'object') {
-    Object.entries(metricSource)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .forEach(([k, v]) => {
-        const n = toNumber(v);
-        if (n === null) return;
-        const digits = Math.abs(n) < 1 ? 5 : 4;
-        vspaeroRows.push({ key: k, label: humanizeVspaeroKey(k), value: fmt(n, digits) });
-      });
-  }
-
-  const solverButtons: SolverId[] = ['openvsp', 'neuralfoil'];
-
   return (
     <div className="canvas-workspace aero-ui">
       <div className="panel-title-row">
@@ -237,7 +320,7 @@ export default function AerodynamicsTab({
       </div>
 
       <div className="solver-selector-row">
-        {solverButtons.map((solver) => {
+        {SOLVER_BUTTONS.map((solver) => {
           const available = Boolean(analysis.results[solver]);
           const selected = analysis.active_solver === solver;
           return (
@@ -294,42 +377,41 @@ export default function AerodynamicsTab({
       )}
 
       <div className="aero-cards">
-        <Metric title="최대 양항비 (L/D)" value={fmt(m?.ld_max, 1)} desc="높을수록 효율적입니다." emphasize />
-        <Metric title="최적 받음각" value={`${fmt(m?.ld_max_aoa, 1)}도`} desc="L/D가 최대인 지점" />
-        <Metric title="최대 양력 각도" value={`${fmt(m?.cl_max_aoa, 1)}도`} desc="CL이 최대인 지점" />
-        <Metric title="최대 CL" value={fmt(m?.cl_max, 3)} desc="최대 양력계수" />
+        {metricCards.map((card) => (
+          <Metric key={card.title} title={card.title} value={card.value} desc={card.desc} emphasize={card.emphasize} />
+        ))}
       </div>
 
       <div className="metric-chip-row">
         {chips.map((chip) => (
-          <span key={chip.k} className="metric-chip">{chip.k} <strong>{chip.v}</strong></span>
+          <span key={chip.key} className="metric-chip">{chip.key} <strong>{chip.value}</strong></span>
         ))}
       </div>
 
       <div className="chart-grid">
-        <Chart title="양력계수 (CL)" x={aoaPlot} y={clPlot} color="#70bbff" yName="CL" xMin={aoaPlotMin} xMax={aoaPlotMax} />
-        <Chart title="양항비 (L/D)" x={aoaPlot} y={ldPlot} color="#efb35b" yName="L/D" xMin={aoaPlotMin} xMax={aoaPlotMax} />
-        <Chart title="항력계수 (CD)" x={aoaPlot} y={cdPlot} color="#6ce8be" yName="CD" xMin={aoaPlotMin} xMax={aoaPlotMax} />
+        {chartSeries.map((series) => (
+          <Chart
+            key={series.key}
+            title={series.title}
+            x={series.x}
+            y={series.y}
+            color={series.color}
+            yName={series.yName}
+            xMin={series.xMin}
+            xMax={series.xMax}
+          />
+        ))}
       </div>
 
       <div className="aero-detail-grid">
-        <section className="detail-card">
-          <h4>양력 특성</h4>
-          <div className="kv"><span>양력 곡선 기울기 (CL_alpha)</span><strong>{fmt(m?.cl_alpha, 2)} /rad</strong></div>
-          <div className="kv"><span>영양력 받음각</span><strong>{fmt(m?.alpha_zero_lift, 2)}도</strong></div>
-        </section>
-
-        <section className="detail-card">
-          <h4>안정성 / 모멘트</h4>
-          <div className="kv"><span>영양력 조건 Cm</span><strong>{fmt(m?.cm_zero_lift, 5)}</strong></div>
-          <div className="kv"><span>Cm 기울기 (Cm_alpha)</span><strong>{fmt(m?.cm_alpha, 4)} /rad</strong></div>
-        </section>
-
-        <section className="detail-card">
-          <h4>항력 특성</h4>
-          <div className="kv"><span>영양력 항력 (CD0)</span><strong>{fmt(m?.cd_zero, 4)}</strong></div>
-          <div className="kv"><span>유도 항력 효율 (e)</span><strong>{fmt(m?.oswald_e, 3)}</strong></div>
-        </section>
+        {detailSections.map((section) => (
+          <section key={section.title} className="detail-card">
+            <h4>{section.title}</h4>
+            {section.rows.map((row) => (
+              <div key={row.label} className="kv"><span>{row.label}</span><strong>{row.value}</strong></div>
+            ))}
+          </section>
+        ))}
       </div>
 
       <section className="vsp-extra-card">
@@ -350,7 +432,17 @@ export default function AerodynamicsTab({
   );
 }
 
-function Metric({ title, value, desc, emphasize = false }: { title: string; value: string; desc: string; emphasize?: boolean }) {
+const Metric = memo(function Metric({
+  title,
+  value,
+  desc,
+  emphasize = false,
+}: {
+  title: string;
+  value: string;
+  desc: string;
+  emphasize?: boolean;
+}) {
   return (
     <div className={`metric-card ${emphasize ? 'emphasize' : ''}`}>
       <div className="metric-title">{title}</div>
@@ -358,9 +450,9 @@ function Metric({ title, value, desc, emphasize = false }: { title: string; valu
       <div className="metric-desc">{desc}</div>
     </div>
   );
-}
+});
 
-function ConditionsEditor({
+const ConditionsEditor = memo(function ConditionsEditor({
   draft,
   applied,
   onDraftChange,
@@ -406,7 +498,7 @@ function ConditionsEditor({
       </div>
     </div>
   );
-}
+});
 
 function NumberField({
   label,
@@ -441,7 +533,7 @@ function NumberField({
   );
 }
 
-function Chart({
+const Chart = memo(function Chart({
   title,
   x,
   y,
@@ -458,7 +550,91 @@ function Chart({
   xMin: number;
   xMax: number;
 }) {
-  if (!x.length || !y.length) {
+  const prepared = useMemo(() => {
+    if (!x.length || !y.length) return null;
+
+    const points = x.map((xValue, index) => [toNumber(xValue) ?? 0, toNumber(y[index]) ?? 0] as [number, number]);
+    const finiteY = y.filter((value) => Number.isFinite(value));
+    const minY = finiteY.length ? Math.min(...finiteY) : 0;
+    const maxY = finiteY.length ? Math.max(...finiteY) : 1;
+    const rangeY = maxY - minY;
+    const pad = rangeY > 0 ? rangeY * 0.1 : Math.max(0.01, Math.abs(maxY || minY) * 0.15, 0.01);
+
+    let yMinAxis = minY - pad;
+    let yMaxAxis = maxY + pad;
+    if (Math.abs(yMinAxis - yMaxAxis) < 1e-9) {
+      yMinAxis -= pad || 0.01;
+      yMaxAxis += pad || 0.01;
+    }
+
+    return {
+      points,
+      axisSpan: yMaxAxis - yMinAxis,
+      yMinAxis,
+      yMaxAxis,
+    };
+  }, [x, y]);
+
+  const option = useMemo(() => {
+    if (!prepared) return null;
+
+    return {
+      backgroundColor: 'transparent',
+      animation: false,
+      grid: { left: 56, right: 20, top: 20, bottom: 44 },
+      xAxis: {
+        type: 'value',
+        name: '받음각(도)',
+        min: xMin,
+        max: xMax,
+        splitNumber: 6,
+        axisLine: { lineStyle: { color: '#28425f' } },
+        splitLine: { lineStyle: { color: '#162a42' } },
+        axisLabel: {
+          color: '#9cb0c8',
+          formatter: (value: number) => fmtAdaptive(Number(value), prepared.axisSpan, 1, 5),
+        },
+        nameTextStyle: { color: '#8ea3bc' },
+      },
+      yAxis: {
+        type: 'value',
+        name: yName,
+        min: prepared.yMinAxis,
+        max: prepared.yMaxAxis,
+        splitNumber: 6,
+        axisLine: { lineStyle: { color: '#28425f' } },
+        splitLine: { lineStyle: { color: '#162a42' } },
+        axisLabel: {
+          color: '#9cb0c8',
+          formatter: (value: number) => fmtAdaptive(Number(value), prepared.axisSpan, 2, 5),
+        },
+        nameTextStyle: { color: '#8ea3bc' },
+      },
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#132237',
+        borderColor: '#2a4f78',
+        textStyle: { color: '#dce8fb' },
+        formatter: (params: Array<{ data?: [number, number] }>) => {
+          const point = params?.[0]?.data;
+          if (!point) return '';
+          return `받음각 ${trimTrailingZeros(Number(point[0]).toFixed(1))}도<br/>${yName}: ${fmtAdaptive(Number(point[1]), prepared.axisSpan, 3, 6)}`;
+        },
+      },
+      series: [
+        {
+          type: 'line',
+          data: prepared.points,
+          smooth: false,
+          showSymbol: false,
+          lineStyle: { width: 2.6, color },
+          areaStyle: { color: `${color}24` },
+        },
+      ],
+    };
+  }, [color, prepared, xMax, xMin, yName]);
+
+  if (!option) {
     return (
       <div className="chart-card">
         <div className="chart-title">{title}</div>
@@ -467,81 +643,20 @@ function Chart({
     );
   }
 
-  const points = x.map((v, i) => [toNumber(v) ?? 0, toNumber(y[i]) ?? 0] as [number, number]);
-  const finiteY = y.filter((v) => Number.isFinite(v));
-  const minY = finiteY.length ? Math.min(...finiteY) : 0;
-  const maxY = finiteY.length ? Math.max(...finiteY) : 1;
-  const rangeY = maxY - minY;
-  const pad = rangeY > 0 ? rangeY * 0.1 : Math.max(0.01, Math.abs(maxY || minY) * 0.15, 0.01);
-
-  let yMinAxis = minY - pad;
-  let yMaxAxis = maxY + pad;
-  if (Math.abs(yMinAxis - yMaxAxis) < 1e-9) {
-    yMinAxis -= pad || 0.01;
-    yMaxAxis += pad || 0.01;
-  }
-  const axisSpan = yMaxAxis - yMinAxis;
-
   return (
     <div className="chart-card">
       <div className="chart-title">{title}</div>
-      <ReactECharts
-        option={{
-          backgroundColor: 'transparent',
-          animation: false,
-          grid: { left: 56, right: 20, top: 20, bottom: 44 },
-          xAxis: {
-            type: 'value',
-            name: '받음각(도)',
-            min: xMin,
-            max: xMax,
-            splitNumber: 6,
-            axisLine: { lineStyle: { color: '#28425f' } },
-            splitLine: { lineStyle: { color: '#162a42' } },
-            axisLabel: {
-              color: '#9cb0c8',
-              formatter: (value: number) => fmtAdaptive(Number(value), axisSpan, 1, 5),
-            },
-            nameTextStyle: { color: '#8ea3bc' },
-          },
-          yAxis: {
-            type: 'value',
-            name: yName,
-            min: yMinAxis,
-            max: yMaxAxis,
-            splitNumber: 6,
-            axisLine: { lineStyle: { color: '#28425f' } },
-            splitLine: { lineStyle: { color: '#162a42' } },
-            axisLabel: {
-              color: '#9cb0c8',
-              formatter: (value: number) => fmtAdaptive(Number(value), axisSpan, 2, 5),
-            },
-            nameTextStyle: { color: '#8ea3bc' },
-          },
-          tooltip: {
-            trigger: 'axis',
-            backgroundColor: '#132237',
-            borderColor: '#2a4f78',
-            textStyle: { color: '#dce8fb' },
-            formatter: (params: Array<{ data?: [number, number] }>) => {
-              const p = params?.[0]?.data;
-              if (!p) return '';
-              return `받음각 ${trimTrailingZeros(Number(p[0]).toFixed(1))}도<br/>${yName}: ${fmtAdaptive(Number(p[1]), axisSpan, 3, 6)}`;
-            },
-          },
-          series: [
-            {
-              type: 'line',
-              data: points,
-              smooth: false,
-              showSymbol: false,
-              lineStyle: { width: 2.6, color },
-              areaStyle: { color: `${color}24` },
-            },
-          ],
-        }}
-        style={{ width: '100%', height: 250 }}
-      />
+      <ReactECharts option={option} style={CHART_STYLE} />
     </div>
   );
+});
+
+function areEqual(prev: Props, next: Props): boolean {
+  return (
+    prev.analysis === next.analysis &&
+    prev.isRunningAnalysis === next.isRunningAnalysis &&
+    prev.isUpdatingConditions === next.isUpdatingConditions
+  );
 }
+
+export default memo(AerodynamicsTab, areEqual);

@@ -169,7 +169,7 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             curve, metrics, case["sref"], case["cref"], case["bref"], raw_aoa=raw_aoa_all
         )
         vspaero_all_data = _build_vspaero_all_data_from_rows(curve_payload["summary_rows"])
-        vspaero_all_data_raw = _build_vspaero_all_data(polar_path)
+        vspaero_all_data_raw = curve_payload.get("vspaero_all_data_raw") or {}
         vsp3 = run_dir / "auav_case.vsp3"
 
         extra_data: dict[str, Any] = {
@@ -616,35 +616,49 @@ def _load_openvsp_curve(
     polar_parsed = _parse_polar_rows(polar_path)
     if polar_parsed is not None:
         headers, rows = polar_parsed
-        primary_rows = _extract_curve_rows_from_polar(headers, rows)
-        selected = _select_stable_curve_rows(primary_rows, aoa_step=aoa_step)
-        if selected is not None:
-            curve_rows, filter_meta = selected
-            filter_meta["requested_aoa_range"] = {"start": float(aoa_start), "end": float(aoa_end)}
-            curve = _curve_rows_to_curve_payload(curve_rows, aoa_start=aoa_start, aoa_end=aoa_end, aoa_step=aoa_step)
-            return {
-                "source": "polar_filtered" if filter_meta.get("dropped_row_count", 0) else "polar",
-                "curve": curve,
-                "raw_aoa": [float(row["aoa"]) for row in curve_rows],
-                "raw_aoa_all": [float(row["aoa"]) for row in primary_rows],
-                "summary_rows": curve_rows,
-                "filtering": filter_meta,
-            }
+        payload = _finalize_openvsp_curve_payload(
+            source="polar",
+            rows=_extract_curve_rows_from_polar(headers, rows),
+            aoa_start=aoa_start,
+            aoa_end=aoa_end,
+            aoa_step=aoa_step,
+            vspaero_all_data_raw=_build_vspaero_all_data_from_headers_and_rows(headers, rows),
+        )
+        if payload is not None:
+            return payload
 
-    stdout_rows = _extract_curve_rows_from_stdout(stdout)
-    selected = _select_stable_curve_rows(stdout_rows, aoa_step=aoa_step)
+    return _finalize_openvsp_curve_payload(
+        source="stdout",
+        rows=_extract_curve_rows_from_stdout(stdout),
+        aoa_start=aoa_start,
+        aoa_end=aoa_end,
+        aoa_step=aoa_step,
+        vspaero_all_data_raw={},
+    )
+
+
+def _finalize_openvsp_curve_payload(
+    *,
+    source: str,
+    rows: list[dict[str, float]],
+    aoa_start: float,
+    aoa_end: float,
+    aoa_step: float,
+    vspaero_all_data_raw: dict[str, float],
+) -> dict[str, Any] | None:
+    selected = _select_stable_curve_rows(rows, aoa_step=aoa_step)
     if selected is None:
         return None
 
     curve_rows, filter_meta = selected
     filter_meta["requested_aoa_range"] = {"start": float(aoa_start), "end": float(aoa_end)}
-    curve = _curve_rows_to_curve_payload(curve_rows, aoa_start=aoa_start, aoa_end=aoa_end, aoa_step=aoa_step)
     return {
-        "source": "stdout_filtered" if filter_meta.get("dropped_row_count", 0) else "stdout",
-        "curve": curve,
+        "source": f"{source}_filtered" if filter_meta.get("dropped_row_count", 0) else source,
+        "curve": _curve_rows_to_curve_payload(curve_rows, aoa_start=aoa_start, aoa_end=aoa_end, aoa_step=aoa_step),
         "raw_aoa": [float(row["aoa"]) for row in curve_rows],
-        "raw_aoa_all": [float(row["aoa"]) for row in stdout_rows],
+        "raw_aoa_all": [float(row["aoa"]) for row in rows],
         "summary_rows": curve_rows,
+        "vspaero_all_data_raw": vspaero_all_data_raw,
         "filtering": filter_meta,
     }
 
@@ -787,7 +801,8 @@ def _select_stable_curve_rows(
         )
     )
     chosen = segments[0]
-    dropped_aoa = [float(row["aoa"]) for row in rows if row not in chosen]
+    chosen_ids = {id(row) for row in chosen}
+    dropped_aoa = [float(row["aoa"]) for row in rows if id(row) not in chosen_ids]
 
     return chosen, {
         "raw_row_count": len(rows),
@@ -862,19 +877,6 @@ def _curve_rows_to_curve_payload(
         return parsed
 
     return _resample_curve_to_unit_aoa(parsed, aoa_start=start, aoa_end=end, aoa_step=aoa_step)
-
-
-def _parse_vspaero_table(stdout: str) -> dict[str, list[float]]:
-    rows = _extract_curve_rows_from_stdout(stdout)
-    if not rows:
-        return {"aoa": [], "cl": [], "cd": [], "cm": []}
-
-    return {
-        "aoa": [float(row["aoa"]) for row in rows],
-        "cl": [float(row["cl"]) for row in rows],
-        "cd": [float(max(1e-6, row["cd"])) for row in rows],
-        "cm": [float(row["cm"]) for row in rows],
-    }
 
 
 def _resample_curve_to_unit_aoa(
@@ -985,15 +987,6 @@ def _build_precision_data(
         "bref": float(bref),
         "reynolds": float(getattr(metrics, "reynolds", 0.0) if metrics else 0.0),
     }
-
-
-def _build_vspaero_all_data(polar_path: Path) -> dict[str, float]:
-    parsed = _parse_polar_rows(polar_path)
-    if not parsed:
-        return {}
-
-    headers, rows = parsed
-    return _build_vspaero_all_data_from_headers_and_rows(headers, rows)
 
 
 def _build_vspaero_all_data_from_rows(rows: list[dict[str, float]]) -> dict[str, float]:

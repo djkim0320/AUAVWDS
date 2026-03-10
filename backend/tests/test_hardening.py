@@ -115,6 +115,62 @@ class ApiHardeningTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()['state']['analysis']['active_solver'], 'neuralfoil')
 
+    def test_state_client_route_and_command_response_strip_heavy_state_fields(self) -> None:
+        set_airfoil = self.client.post('/command', json={'command': {'type': 'SetAirfoil', 'payload': {'code': '2412'}}})
+        self.assertEqual(set_airfoil.status_code, 200)
+
+        build_mesh = self.client.post('/command', json={'command': {'type': 'BuildWingMesh', 'payload': {}}})
+        self.assertEqual(build_mesh.status_code, 200)
+        self._assert_client_state_shape(build_mesh.json()['state'], expect_mesh=True)
+
+        neuralfoil = self.client.post('/command', json={'command': {'type': 'RunNeuralFoilAnalysis', 'payload': {}}})
+        self.assertEqual(neuralfoil.status_code, 200)
+        self._assert_client_state_shape(neuralfoil.json()['state'], expect_mesh=True)
+
+        full_state = self.client.get('/state').json()
+        client_state = self.client.get('/state/client').json()
+        self._assert_client_state_shape(client_state, expect_mesh=True)
+
+        self.assertGreaterEqual(len(full_state['history']), 1)
+        self.assertTrue(full_state['airfoil']['coords'])
+        self.assertIsNotNone(full_state['wing']['planform_2d'])
+        self.assertTrue(full_state['wing']['preview_mesh']['pressure_overlay'])
+
+        full_extra = full_state['analysis']['results']['neuralfoil']['extra_data']
+        client_extra = client_state['analysis']['results']['neuralfoil']['extra_data']
+        self.assertIn('raw_neuralfoil_output', full_extra)
+        self.assertNotIn('raw_neuralfoil_output', client_extra)
+        self.assertIn('solver_scalar_data', client_extra)
+
+    def test_reset_chat_and_load_return_client_state_shape(self) -> None:
+        self._prepare_mesh()
+        save_res = self.client.post('/saves', json={'name': 'baseline'})
+        self.assertEqual(save_res.status_code, 200)
+        save_id = save_res.json()['id']
+
+        with patch('app.services.llm_chat.LLMChatOrchestrator.run_agent_turn', return_value={'text': 'ok', 'applied_tools': []}):
+            chat_res = self.client.post(
+                '/chat',
+                json={
+                    'message': 'status',
+                    'history': [],
+                    'provider': 'openai',
+                    'model': 'gpt-5.2',
+                    'base_url': 'https://example.invalid/v1',
+                    'api_key': 'test-key',
+                },
+            )
+
+        reset_res = self.client.post('/reset')
+        load_res = self.client.post('/saves/load', json={'save_id': save_id})
+
+        self.assertEqual(chat_res.status_code, 200)
+        self.assertEqual(reset_res.status_code, 200)
+        self.assertEqual(load_res.status_code, 200)
+        self._assert_client_state_shape(chat_res.json()['state'], expect_mesh=True)
+        self._assert_client_state_shape(reset_res.json()['state'], expect_mesh=False)
+        self._assert_client_state_shape(load_res.json()['state'], expect_mesh=True)
+
     def test_set_wing_accepts_explicit_wingtip_style(self) -> None:
         res = self.client.post(
             '/command',
@@ -189,11 +245,59 @@ class ApiHardeningTests(unittest.TestCase):
         self.assertAlmostEqual(state['wing']['params']['span_m'], 2.7)
         self.assertAlmostEqual(state['wing']['params']['sweep_deg'], 12.0)
 
+    def test_run_precision_alias_normalizes_without_duplicate_history(self) -> None:
+        res = self.client.post('/command', json={'command': {'type': 'RunPrecisionAnalysis', 'payload': {}}})
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()['applied_commands'][0]['type'], 'RunOpenVspAnalysis')
+
+        full_state = self.client.get('/state').json()
+        self.assertEqual(len(full_state['history']), 1)
+
+    def test_set_wing_invalidates_preview_mesh_and_planform(self) -> None:
+        self._prepare_mesh()
+
+        res = self.client.post('/command', json={'command': {'type': 'SetWing', 'payload': {'span_m': 2.4}}})
+
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNone(res.json()['state']['wing']['preview_mesh'])
+
+        full_state = self.client.get('/state').json()
+        self.assertIsNone(full_state['wing']['preview_mesh'])
+        self.assertIsNone(full_state['wing']['planform_2d'])
+
+    def test_build_wing_mesh_reuses_cached_geometry_for_identical_inputs(self) -> None:
+        set_airfoil = self.client.post('/command', json={'command': {'type': 'SetAirfoil', 'payload': {'code': '2412'}}})
+        self.assertEqual(set_airfoil.status_code, 200)
+
+        with patch('app.services.command_engine.build_wing_mesh', wraps=build_wing_mesh) as mocked_build:
+            first = self.client.post('/command', json={'command': {'type': 'BuildWingMesh', 'payload': {}}})
+            second = self.client.post('/command', json={'command': {'type': 'BuildWingMesh', 'payload': {}}})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(mocked_build.call_count, 1)
+        self._assert_client_state_shape(first.json()['state'], expect_mesh=True)
+        self._assert_client_state_shape(second.json()['state'], expect_mesh=True)
+
     def _prepare_mesh(self) -> None:
         set_airfoil = self.client.post('/command', json={'command': {'type': 'SetAirfoil', 'payload': {'code': '2412'}}})
         self.assertEqual(set_airfoil.status_code, 200)
         build_mesh = self.client.post('/command', json={'command': {'type': 'BuildWingMesh', 'payload': {}}})
         self.assertEqual(build_mesh.status_code, 200)
+
+    def _assert_client_state_shape(self, state: dict[str, object], *, expect_mesh: bool) -> None:
+        self.assertEqual(state['history'], [])
+        self.assertEqual(state['airfoil']['coords'], [])
+        self.assertEqual(state['airfoil']['upper'], [])
+        self.assertEqual(state['airfoil']['lower'], [])
+        self.assertEqual(state['airfoil']['camber'], [])
+        self.assertIsNone(state['wing']['planform_2d'])
+        if expect_mesh:
+            self.assertIsNotNone(state['wing']['preview_mesh'])
+            self.assertEqual(state['wing']['preview_mesh']['pressure_overlay'], [])
+        else:
+            self.assertIsNone(state['wing']['preview_mesh'])
 
 
 class PrecisionAnalysisTests(unittest.TestCase):
@@ -571,6 +675,21 @@ class SaveManagerTests(unittest.TestCase):
                 left['summary']['airfoil']['shape_signature'],
                 right['summary']['airfoil']['shape_signature'],
             )
+
+    def test_list_uses_cached_records_when_snapshot_files_are_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            manager = SaveManager(work_dir)
+            manager.save(AppState(), 'cached')
+
+            first_rows = manager.list()
+            self.assertEqual(len(first_rows), 1)
+
+            with patch.object(Path, 'read_text', side_effect=AssertionError('cached list should not reread snapshot files')):
+                second_rows = manager.list()
+
+            self.assertEqual(len(second_rows), 1)
+            self.assertEqual(second_rows[0]['name'], 'cached')
 
 
 class MetricFormulaTests(unittest.TestCase):

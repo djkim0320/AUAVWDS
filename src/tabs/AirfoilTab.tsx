@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from 'react';
+﻿import { memo, useEffect, useMemo, useState } from 'react';
 import type { AirfoilState } from '../types';
 
 type Props = {
@@ -96,7 +96,7 @@ function toCanvasPoint(p: Pt): Pt {
   return [p[0] * SX + OX, -p[1] * SY + OY];
 }
 
-export default function AirfoilTab({ airfoil, onApplyCustom, isApplying }: Props) {
+function AirfoilTab({ airfoil, onApplyCustom, isApplying }: Props) {
   const initialThickness = airfoil.summary.thickness_percent || 12;
   const initialCamber = airfoil.summary.max_camber_percent || 2;
   const initialCamberPos = airfoil.summary.max_camber_x_percent || 40;
@@ -233,3 +233,9 @@ function Slider({ label, min, max, step, value, onChange }: SliderProps) {
     </div>
   );
 }
+
+function areEqual(prev: Props, next: Props) {
+  return prev.airfoil === next.airfoil && prev.isApplying === next.isApplying;
+}
+
+export default memo(AirfoilTab, areEqual);

@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('auavApi', {
     return () => ipcRenderer.removeListener('backend:ready', listener);
   },
   getState: () => ipcRenderer.invoke('backend:state'),
+  getFullState: () => ipcRenderer.invoke('backend:state-full'),
   chat: (req) => ipcRenderer.invoke('backend:chat', req),
   command: (req) => ipcRenderer.invoke('backend:command', req),
   reset: () => ipcRenderer.invoke('backend:reset'),

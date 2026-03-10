@@ -24,19 +24,6 @@ class StateStore:
         with self._lock:
             return self._clone_state(self._state)
 
-    def set(self, state: AppState) -> None:
-        with self._lock:
-            self._state = state
-
-    def mutate(self, fn) -> AppState:
-        with self._lock:
-            state = AppState.model_validate(self._state.model_dump())
-            next_state = fn(state)
-            if not isinstance(next_state, AppState):
-                raise TypeError('mutate callback must return AppState')
-            self._state = next_state
-            return self._clone_state(self._state)
-
     def transact(self, fn: Callable[[AppState], tuple[AppState, _T]]) -> tuple[AppState, _T]:
         with self._lock:
             working = self._clone_state(self._state)
@@ -53,8 +40,7 @@ class StateStore:
 
     @staticmethod
     def _clone_state(state: AppState) -> AppState:
-        payload = migrate_legacy_state_payload(state.model_dump())
-        return AppState.model_validate(payload)
+        return state.model_copy(deep=True)
 
 
 class SaveManager:
@@ -62,17 +48,14 @@ class SaveManager:
         self._save_dir = work_dir / 'saves'
         self._save_dir.mkdir(parents=True, exist_ok=True)
         self._save_id_re = re.compile(r'^[0-9a-f]{32}$')
+        self._record_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
 
     def list(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        for p in self._save_dir.glob('*.json'):
-            try:
-                payload = json.loads(p.read_text(encoding='utf-8'))
-                if not isinstance(payload, dict):
-                    continue
-                records.append(payload)
-            except Exception:
-                continue
+        for snapshot_path in self._snapshot_paths():
+            record = self._read_record_for_listing(snapshot_path)
+            if record:
+                records.append(record)
         records.sort(key=self._sort_key, reverse=True)
         return records
 
@@ -93,11 +76,15 @@ class SaveManager:
             'summary': summary,
             'state': state.model_dump(),
         }
-        (self._save_dir / f'{rec_id}.json').write_text(
+        snapshot_path = self._snapshot_path(rec_id)
+        snapshot_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding='utf-8',
         )
-        return {k: payload[k] for k in ('id', 'name', 'created_at', 'summary')}
+        record = self._record_view(payload, rec_id)
+        self._write_meta(record)
+        self._store_cached_record(rec_id, snapshot_path, record)
+        return record
 
     def load(self, save_id: str) -> AppState:
         payload = self._read_payload(save_id)
@@ -108,8 +95,21 @@ class SaveManager:
         return AppState.model_validate(migrated)
 
     def get_record(self, save_id: str) -> dict[str, Any]:
+        snapshot_path = self._resolve_save_path(save_id)
+        cached = self._cached_record(save_id, snapshot_path)
+        if cached is not None:
+            return cached
+
+        meta = self._read_meta(save_id)
+        if meta is not None:
+            record = self._record_view(meta, save_id)
+            self._store_cached_record(save_id, snapshot_path, record)
+            return record
         payload = self._read_payload(save_id)
-        return self._record_view(payload, save_id)
+        record = self._record_view(payload, save_id)
+        self._write_meta(record)
+        self._store_cached_record(save_id, snapshot_path, record)
+        return record
 
     def compare(self, left_id: str, right_id: str) -> dict[str, Any]:
         left_raw = self._read_payload(left_id)
@@ -128,6 +128,8 @@ class SaveManager:
             ('sweep_deg', left_wing.get('sweep_deg'), right_wing.get('sweep_deg')),
             ('taper_ratio', left_wing.get('taper_ratio'), right_wing.get('taper_ratio')),
             ('dihedral_deg', left_wing.get('dihedral_deg'), right_wing.get('dihedral_deg')),
+            ('twist_deg', left_wing.get('twist_deg'), right_wing.get('twist_deg')),
+            ('wingtip_style', left_wing.get('wingtip_style'), right_wing.get('wingtip_style')),
             ('airfoil', left_airfoil.get('code'), right_airfoil.get('code')),
             (
                 'airfoil_thickness_percent',
@@ -204,6 +206,74 @@ class SaveManager:
             'summary': f"{left_raw.get('name')} -> {right_raw.get('name')} comparison complete",
         }
 
+    def _snapshot_paths(self) -> list[Path]:
+        return sorted(
+            path
+            for path in self._save_dir.glob('*.json')
+            if not path.name.endswith('.meta.json')
+        )
+
+    def _snapshot_path(self, save_id: str) -> Path:
+        return self._save_dir / f'{save_id}.json'
+
+    def _meta_path(self, save_id: str) -> Path:
+        return self._save_dir / f'{save_id}.meta.json'
+
+    def _read_record_for_listing(self, snapshot_path: Path) -> dict[str, Any] | None:
+        save_id = snapshot_path.stem
+        cached = self._cached_record(save_id, snapshot_path)
+        if cached is not None:
+            return cached
+
+        meta = self._read_meta(save_id)
+        if meta is not None:
+            try:
+                record = self._record_view(meta, save_id)
+                self._store_cached_record(save_id, snapshot_path, record)
+                return record
+            except ValueError:
+                pass
+
+        try:
+            payload = json.loads(snapshot_path.read_text(encoding='utf-8'))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        try:
+            record = self._record_view(payload, save_id)
+        except ValueError:
+            return None
+
+        self._write_meta(record)
+        self._store_cached_record(save_id, snapshot_path, record)
+        return record
+
+    def _read_meta(self, save_id: str) -> dict[str, Any] | None:
+        path = self._meta_path(save_id)
+        if not path.exists():
+            return None
+
+        try:
+            payload = json.loads(path.read_text(encoding='utf-8'))
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _write_meta(self, record: dict[str, Any]) -> None:
+        save_id = str(record.get('id') or '')
+        if not self._save_id_re.fullmatch(save_id):
+            return
+        meta_path = self._meta_path(save_id)
+        meta_path.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+        snapshot_path = self._snapshot_path(save_id)
+        if snapshot_path.exists():
+            self._store_cached_record(save_id, snapshot_path, record)
+
     def _read_payload(self, save_id: str) -> dict[str, Any]:
         path = self._resolve_save_path(save_id)
         if not path.exists():
@@ -222,12 +292,38 @@ class SaveManager:
             raise ValueError(f'Save is corrupted: {save_id}')
         return {k: payload[k] for k in required}
 
+    def _cached_record(self, save_id: str, snapshot_path: Path) -> dict[str, Any] | None:
+        snapshot_mtime = self._file_mtime_ns(snapshot_path)
+        meta_mtime = self._file_mtime_ns(self._meta_path(save_id))
+        cached = self._record_cache.get(save_id)
+        if cached is None:
+            return None
+
+        cached_snapshot_mtime, cached_meta_mtime, record = cached
+        if cached_snapshot_mtime != snapshot_mtime or cached_meta_mtime != meta_mtime:
+            return None
+        return dict(record)
+
+    def _store_cached_record(self, save_id: str, snapshot_path: Path, record: dict[str, Any]) -> None:
+        self._record_cache[save_id] = (
+            self._file_mtime_ns(snapshot_path),
+            self._file_mtime_ns(self._meta_path(save_id)),
+            dict(record),
+        )
+
+    @staticmethod
+    def _file_mtime_ns(path: Path) -> int:
+        try:
+            return path.stat().st_mtime_ns
+        except FileNotFoundError:
+            return -1
+
     def _resolve_save_path(self, save_id: str) -> Path:
         if not self._save_id_re.fullmatch(save_id or ''):
             raise ValueError(f'Invalid save id: {save_id}')
 
         base = self._save_dir.resolve()
-        path = (self._save_dir / f'{save_id}.json').resolve()
+        path = self._snapshot_path(save_id).resolve()
         if not path.is_relative_to(base):
             raise ValueError(f'Invalid save id: {save_id}')
         return path

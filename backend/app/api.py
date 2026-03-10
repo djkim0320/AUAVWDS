@@ -12,10 +12,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.models.state import AppState, CommandEnvelope, get_active_result, get_solver_result
+from app.models.state import AppState, CommandEnvelope, get_solver_result
 from app.services.command_engine import CommandEngine
 from app.services.llm_chat import LLMChatOrchestrator
 from app.services.state_store import SaveManager, StateStore
+from app.services.state_summary import build_llm_state_summary, serialize_client_state
 
 
 class ChatMessage(BaseModel):
@@ -93,11 +94,15 @@ def create_app(work_dir: Path) -> FastAPI:
     def state() -> dict[str, Any]:
         return store.get().model_dump()
 
+    @app.get("/state/client")
+    def client_state() -> dict[str, Any]:
+        return serialize_client_state(store.get())
+
     @app.post("/reset")
     def reset() -> dict[str, Any]:
         s, _ = store.transact(lambda _state: (AppState(), None))
         return {
-            "state": s.model_dump(),
+            "state": serialize_client_state(s),
             "applied_commands": [{"type": "Reset", "payload": {}}],
             "explanation": "State reset complete.",
             "warnings": [],
@@ -107,13 +112,14 @@ def create_app(work_dir: Path) -> FastAPI:
     @app.post("/command")
     def command(req: CommandRequest) -> dict[str, Any]:
         try:
-            next_state, explanation = store.transact(lambda state: engine.execute(state, req.command))
+            normalized_command = engine.validate_command(req.command)
+            next_state, explanation = store.transact(lambda state: engine.execute(state, normalized_command))
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         return {
-            "state": next_state.model_dump(),
-            "applied_commands": [req.command.model_dump()],
+            "state": serialize_client_state(next_state),
+            "applied_commands": [normalized_command.model_dump()],
             "explanation": explanation,
             "warnings": [],
             "assistant_message": explanation,
@@ -149,7 +155,7 @@ def create_app(work_dir: Path) -> FastAPI:
             assistant = "모델 응답을 받지 못했어요. 다시 시도해 주세요."
 
         return {
-            "state": state.model_dump(),
+            "state": serialize_client_state(state),
             "applied_commands": [c.model_dump() for c in applied_commands],
             "explanation": assistant,
             "warnings": [],
@@ -182,7 +188,7 @@ def create_app(work_dir: Path) -> FastAPI:
 
         loaded_state, _ = store.transact(lambda _state: (loaded, None))
         return {
-            "state": loaded_state.model_dump(),
+            "state": serialize_client_state(loaded_state),
             "applied_commands": [{"type": "Reset", "payload": {}}],
             "explanation": "Saved snapshot loaded.",
             "warnings": [],
@@ -276,7 +282,7 @@ def _run_chat_transaction(
             "ok": True,
             "command": cmd.type,
             "message": explanation,
-            "state_summary": summarize_state(state),
+            "state_summary": build_llm_state_summary(state),
         }
 
     llm_out = llm.run_agent_turn(
@@ -286,7 +292,7 @@ def _run_chat_transaction(
         api_key=req.api_key,
         history=history,
         message=req.message,
-        state_summary=summarize_state(state),
+        state_summary=build_llm_state_summary(state),
         tool_executor=execute_tool,
     )
 
@@ -316,102 +322,6 @@ def _build_export_path(work_dir: Path, requested_output: str | None, requested_f
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     return export_dir / f"wing_{stamp}{suffix}"
-
-
-def summarize_state(state: AppState) -> dict[str, Any]:
-    active_solver, active = get_active_result(state.analysis)
-    active_metric = active.metrics.model_dump() if active and active.metrics else None
-    active_curve = None
-    active_curve_range = None
-    active_curve_samples = None
-    precision_data = None
-    vspaero_all_data = None
-    vspaero_focus_data = None
-
-    if active:
-        active_curve = {
-            "aoa_deg": [float(x) for x in (active.curve.aoa_deg or [])],
-            "cl": [float(x) for x in (active.curve.cl or [])],
-            "cd": [float(x) for x in (active.curve.cd or [])],
-            "cm": [float(x) for x in (active.curve.cm or [])],
-        }
-        aoa = active_curve["aoa_deg"]
-        cl = active_curve["cl"]
-        cd = active_curve["cd"]
-        cm = active_curve["cm"]
-        if aoa and cl and cd and cm:
-            active_curve_range = {
-                "aoa_min": float(min(aoa)),
-                "aoa_max": float(max(aoa)),
-                "point_count": len(aoa),
-            }
-            target_aoa = [-10.0, -5.0, 0.0, 5.0, 10.0, 15.0, 20.0]
-            samples: dict[str, dict[str, float]] = {}
-            for a in target_aoa:
-                idx = min(range(len(aoa)), key=lambda i: abs(aoa[i] - a))
-                cd_i = cd[idx]
-                ld_i = (cl[idx] / cd_i) if abs(cd_i) > 1e-9 else 0.0
-                samples[f"{a:.0f}"] = {
-                    "aoa_deg": float(aoa[idx]),
-                    "cl": float(cl[idx]),
-                    "cd": float(cd[idx]),
-                    "cm": float(cm[idx]),
-                    "ld": float(ld_i),
-                }
-            active_curve_samples = samples
-        extra = active.extra_data or {}
-        pd = extra.get("precision_data")
-        va = extra.get("vspaero_all_data")
-        if isinstance(pd, dict):
-            precision_data = pd
-        if isinstance(va, dict):
-            vspaero_all_data = va
-            focus_keys = [
-                "aoa_ld_max",
-                "l_d_max",
-                "cltot_ld_max",
-                "cltot_max",
-                "cltot_min",
-                "cdtot_ld_max",
-                "cdtot_min",
-                "cdtot_max",
-                "cmytot_ld_max",
-                "cmytot_max",
-                "cmytot_min",
-                "e_ld_max",
-            ]
-            focus: dict[str, float] = {}
-            for k in focus_keys:
-                v = va.get(k)
-                if isinstance(v, (int, float)):
-                    focus[k] = float(v)
-            vspaero_focus_data = focus or None
-
-    return {
-        "airfoil": state.airfoil.summary.model_dump(),
-        "wing": state.wing.params.model_dump(),
-        "analysis_conditions": state.analysis.conditions.model_dump(),
-        "active_solver": active_solver,
-        "analysis_available": bool(active),
-        "available_results": {
-            "openvsp": state.analysis.results.openvsp is not None,
-            "neuralfoil": state.analysis.results.neuralfoil is not None,
-        },
-        "active_source_label": active.source_label if active else None,
-        "active_result_mode": active.analysis_mode if active else None,
-        "active_result_solver_id": active.extra_data.get("solver_id") if active else None,
-        "active_fallback_reason": active.fallback_reason if active else None,
-        "active_notes": active.notes if active else None,
-        "active_solver_airfoil": active.extra_data.get("solver_airfoil") if active else None,
-        "has_mesh": bool(state.wing.preview_mesh and state.wing.preview_mesh.vertices),
-        "active_metrics": active_metric,
-        "active_curve": active_curve,
-        "active_curve_range": active_curve_range,
-        "active_curve_samples": active_curve_samples,
-        "precision_data": precision_data,
-        "vspaero_all_data": vspaero_all_data,
-        "vspaero_focus_data": vspaero_focus_data,
-    }
 
 
 def mesh_to_obj(vertices: list[list[float]], triangles: list[list[int]]) -> str:

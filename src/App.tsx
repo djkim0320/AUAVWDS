@@ -183,6 +183,15 @@ const DEFAULT_MODEL_BY_PROVIDER: Record<ProviderId, string> = {
   grok: 'grok-4-1-fast-reasoning',
 };
 
+const PROVIDER_ORDER: ProviderId[] = ['gemini', 'openai', 'anthropic', 'grok'];
+const MODEL_CATALOG_BY_PROVIDER = PROVIDER_ORDER.reduce(
+  (grouped, providerId) => {
+    grouped[providerId] = MODEL_CATALOG.filter((card) => card.provider === providerId);
+    return grouped;
+  },
+  {} as Record<ProviderId, ModelCard[]>,
+);
+
 function defaultState(): AppState {
   return {
     airfoil: {
@@ -236,24 +245,16 @@ function modelById(modelId: string, providerFallback?: ProviderId): ModelCard {
 }
 
 function readProviderConfig(): Record<ProviderId, ProviderConfig> {
-  return {
-    gemini: {
-      baseUrl: localStorage.getItem(`${LS_BASE_URL_PREFIX}gemini`) || PROVIDER_META.gemini.defaultBase,
-      apiKey: localStorage.getItem(`${LS_API_KEY_PREFIX}gemini`) || '',
+  return PROVIDER_ORDER.reduce(
+    (configs, providerId) => {
+      configs[providerId] = {
+        baseUrl: localStorage.getItem(`${LS_BASE_URL_PREFIX}${providerId}`) || PROVIDER_META[providerId].defaultBase,
+        apiKey: localStorage.getItem(`${LS_API_KEY_PREFIX}${providerId}`) || '',
+      };
+      return configs;
     },
-    openai: {
-      baseUrl: localStorage.getItem(`${LS_BASE_URL_PREFIX}openai`) || PROVIDER_META.openai.defaultBase,
-      apiKey: localStorage.getItem(`${LS_API_KEY_PREFIX}openai`) || '',
-    },
-    anthropic: {
-      baseUrl: localStorage.getItem(`${LS_BASE_URL_PREFIX}anthropic`) || PROVIDER_META.anthropic.defaultBase,
-      apiKey: localStorage.getItem(`${LS_API_KEY_PREFIX}anthropic`) || '',
-    },
-    grok: {
-      baseUrl: localStorage.getItem(`${LS_BASE_URL_PREFIX}grok`) || PROVIDER_META.grok.defaultBase,
-      apiKey: localStorage.getItem(`${LS_API_KEY_PREFIX}grok`) || '',
-    },
-  };
+    {} as Record<ProviderId, ProviderConfig>,
+  );
 }
 
 export default function App() {
@@ -292,7 +293,12 @@ export default function App() {
 
   const activeModel = useMemo(() => modelById(model, provider), [model, provider]);
   const activeProviderMeta = PROVIDER_META[provider];
-  const providerOrder: ProviderId[] = ['gemini', 'openai', 'anthropic', 'grok'];
+  const savesById = useMemo(() => new Map(saves.map((save) => [save.id, save] as const)), [saves]);
+  const saveOptions = useMemo(() => saves.map((save) => ({ id: save.id, name: save.name })), [saves]);
+  const selectedSaveLabel = useMemo(
+    () => (selectedSave ? `선택된 저장: ${savesById.get(selectedSave)?.name || selectedSave}` : '저장 기록 없음'),
+    [selectedSave, savesById],
+  );
 
   useEffect(() => {
     localStorage.setItem(LS_PROVIDER, provider);
@@ -322,10 +328,11 @@ export default function App() {
   }, [chatCollapsed, showModelDrawer]);
 
   useEffect(() => {
-    (Object.keys(providerConfigs) as ProviderId[]).forEach((p) => {
-      localStorage.setItem(`${LS_BASE_URL_PREFIX}${p}`, providerConfigs[p].baseUrl);
-      localStorage.setItem(`${LS_API_KEY_PREFIX}${p}`, providerConfigs[p].apiKey);
-    });
+    for (const providerId of PROVIDER_ORDER) {
+      const cfg = providerConfigs[providerId];
+      localStorage.setItem(`${LS_BASE_URL_PREFIX}${providerId}`, cfg.baseUrl);
+      localStorage.setItem(`${LS_API_KEY_PREFIX}${providerId}`, cfg.apiKey);
+    }
   }, [providerConfigs]);
 
   useEffect(() => {
@@ -570,11 +577,7 @@ export default function App() {
       </header>
 
       <section className="history-bar">
-        <div className="history-current">
-          {selectedSave
-            ? `선택된 저장: ${saves.find((s) => s.id === selectedSave)?.name || selectedSave}`
-            : '저장 기록 없음'}
-        </div>
+        <div className="history-current">{selectedSaveLabel}</div>
         <button
           className="history-open-btn"
           onClick={() => {
@@ -664,10 +667,10 @@ export default function App() {
               </div>
 
               <div className="drawer-list">
-                {providerOrder.map((p) => (
+                {PROVIDER_ORDER.map((p) => (
                   <div key={p} className="drawer-group">
                     <div className="drawer-group-title">{PROVIDER_META[p].label}</div>
-                    {MODEL_CATALOG.filter((m) => m.provider === p).map((item) => {
+                    {MODEL_CATALOG_BY_PROVIDER[p].map((item) => {
                       const selected = model === item.id;
                       const enabled = hasApiKey(item.provider);
                       return (
@@ -774,8 +777,8 @@ export default function App() {
                 <label>저장 목록</label>
                 <select value={selectedSave} onChange={(e) => setSelectedSave(e.target.value)}>
                   <option value="">저장 기록 없음</option>
-                  {saves.map((s) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
+                  {saveOptions.map((save) => (
+                    <option key={save.id} value={save.id}>{save.name}</option>
                   ))}
                 </select>
                 <div className="history-actions-row">
@@ -790,16 +793,16 @@ export default function App() {
                 <label>비교 A</label>
                 <select value={compareA} onChange={(e) => setCompareA(e.target.value)}>
                   <option value="">비교 A 선택</option>
-                  {saves.map((s) => (
-                    <option key={`A-${s.id}`} value={s.id}>{s.name}</option>
+                  {saveOptions.map((save) => (
+                    <option key={`A-${save.id}`} value={save.id}>{save.name}</option>
                   ))}
                 </select>
 
                 <label>비교 B</label>
                 <select value={compareB} onChange={(e) => setCompareB(e.target.value)}>
                   <option value="">비교 B 선택</option>
-                  {saves.map((s) => (
-                    <option key={`B-${s.id}`} value={s.id}>{s.name}</option>
+                  {saveOptions.map((save) => (
+                    <option key={`B-${save.id}`} value={save.id}>{save.name}</option>
                   ))}
                 </select>
 
@@ -820,7 +823,7 @@ export default function App() {
             </div>
 
             <div className="provider-grid">
-              {providerOrder.map((p) => (
+              {PROVIDER_ORDER.map((p) => (
                 <div className="provider-card" key={p}>
                   <div className="provider-card-head">
                     <strong>{PROVIDER_META[p].label}</strong>

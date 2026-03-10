@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { AnalysisState, ExportFormat, WingState, WingtipStyle } from '../types';
@@ -27,7 +27,7 @@ function wingtipStyleLabel(style: WingtipStyle): string {
   return style === 'pinched' ? '조임형' : '직선형';
 }
 
-export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: Props) {
+function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>('obj');
 
@@ -51,8 +51,8 @@ export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: 
     const openvspExtra = (openvspResult?.extra_data || {}) as Record<string, unknown>;
     const hasVsp3 =
       openvspResult?.analysis_mode === 'openvsp' &&
-      typeof openvspExtra?.vsp3_path === 'string' &&
-      openvspExtra.vsp3_path.length > 0;
+      (openvspExtra?.can_export_vsp3 === true ||
+        (Array.isArray(openvspExtra?.available_artifacts) && openvspExtra.available_artifacts.includes('auav_case.vsp3')));
     const linked = result.analysis_mode === 'openvsp' && (solverMode === 'openvsp-script' || hasVsp3);
 
     return {
@@ -213,3 +213,9 @@ export default function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: 
     </div>
   );
 }
+
+function areEqual(prev: Props, next: Props) {
+  return prev.wing === next.wing && prev.analysis === next.analysis && prev.isExporting === next.isExporting;
+}
+
+export default memo(Wing3DTab, areEqual);

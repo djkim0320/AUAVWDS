@@ -178,7 +178,8 @@ async function invokeBackend(pathname, method = 'GET', body) {
 }
 
 function registerIpc() {
-  ipcMain.handle('backend:state', () => invokeBackend('/state'));
+  ipcMain.handle('backend:state', () => invokeBackend('/state/client'));
+  ipcMain.handle('backend:state-full', () => invokeBackend('/state'));
   ipcMain.handle('backend:chat', (_evt, req) => invokeBackend('/chat', 'POST', req));
   ipcMain.handle('backend:command', (_evt, req) => invokeBackend('/command', 'POST', req));
   ipcMain.handle('backend:reset', () => invokeBackend('/reset', 'POST'));

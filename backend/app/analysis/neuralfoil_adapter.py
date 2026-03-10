@@ -186,6 +186,7 @@ def run_neuralfoil_analysis(state: AppState, work_dir: str | Path, payload: dict
         "limitation_note": "VLM/패널 solver가 아니며, 2D 에어포일 해석 결과에 명시적 날개 보정을 적용한 추정 결과입니다.",
         "airfoil_representation": "coordinates",
         "raw_neuralfoil_output": raw_payload,
+        "solver_scalar_data": _scalar_numeric_payload(raw_payload),
         "analysis_confidence": raw_payload.get("analysis_confidence"),
         "used_reynolds": float(reynolds),
         "used_n_crit": 9.0,
@@ -338,3 +339,13 @@ def _jsonify(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonify(v) for v in value]
     return value
+
+
+def _scalar_numeric_payload(payload: dict[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for key, value in payload.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            out[str(key)] = float(value)
+    return out

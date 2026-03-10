@@ -32,6 +32,7 @@ type ExportResponse = {
 type Bridge = {
   onBackendReady: (cb: (payload: { baseUrl: string }) => void) => () => void;
   getState: () => Promise<AppState>;
+  getFullState: () => Promise<AppState>;
   chat: (req: ChatRequest) => Promise<BackendResponse>;
   command: (req: { command: CommandEnvelope }) => Promise<BackendResponse>;
   reset: () => Promise<BackendResponse>;
@@ -94,7 +95,8 @@ function createHttpBridge(): Bridge {
       queueMicrotask(() => cb({ baseUrl: WEB_BACKEND_BASE_URL }));
       return () => {};
     },
-    getState: () => httpJson<AppState>('/state'),
+    getState: () => httpJson<AppState>('/state/client'),
+    getFullState: () => httpJson<AppState>('/state'),
     chat: (req) => httpJson<BackendResponse>('/chat', { method: 'POST', body: JSON.stringify(req) }),
     command: (req) => httpJson<BackendResponse>('/command', { method: 'POST', body: JSON.stringify(req) }),
     reset: () => httpJson<BackendResponse>('/reset', { method: 'POST' }),
