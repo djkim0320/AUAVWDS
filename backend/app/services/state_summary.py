@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -49,6 +50,9 @@ _CLIENT_EXTRA_KEYS = (
     "used_n_crit",
     "used_model_size",
     "used_mach",
+    "used_reference_source",
+    "used_oswald",
+    "used_oswald_source",
     "curve_source",
     "row_count",
     "row_count_raw",
@@ -145,13 +149,47 @@ def serialize_client_state(state: AppState) -> ClientAppState:
     )
 
 
+def _recommended_reynolds_hint(state: AppState) -> dict[str, Any] | None:
+    conditions = state.analysis.conditions
+    if conditions.reynolds is not None:
+        return None
+
+    mach = float(conditions.mach or 0.0)
+    span_m = float(state.wing.params.span_m or 0.0)
+    aspect_ratio = float(state.wing.params.aspect_ratio or 0.0)
+    if mach <= 0.0 or span_m <= 0.0 or aspect_ratio <= 0.0:
+        return None
+
+    representative_chord_m = span_m / aspect_ratio
+    speed_mps = mach * 340.3
+    if representative_chord_m <= 0.0 or speed_mps <= 0.0:
+        return None
+
+    estimated_reynolds = speed_mps * representative_chord_m / 1.5e-5
+    if estimated_reynolds <= 0.0:
+        return None
+
+    recommended_reynolds = int(round(estimated_reynolds / 100.0) * 100)
+    return {
+        "reynolds": recommended_reynolds,
+        "source": "mach_and_mean_chord_estimate",
+        "speed_mps": round(speed_mps, 3),
+        "representative_chord_m": round(representative_chord_m, 4),
+        "mach": mach,
+        "note": "Use this inferred Reynolds before solver analysis when the user did not specify one.",
+    }
+
+
 def build_llm_state_summary(state: AppState) -> dict[str, Any]:
     active_solver, active = get_active_result(state.analysis)
     curve_summary = _curve_summary(active)
+    reynolds_hint = _recommended_reynolds_hint(state)
     return {
         "airfoil": state.airfoil.summary.model_dump(),
         "wing": state.wing.params.model_dump(),
         "analysis_conditions": state.analysis.conditions.model_dump(),
+        "recommended_reynolds": reynolds_hint["reynolds"] if reynolds_hint else None,
+        "recommended_reynolds_basis": reynolds_hint,
         "active_solver": active_solver,
         "analysis_available": bool(active),
         "available_results": {
@@ -249,13 +287,23 @@ def _curve_summary(result: AnalysisResult | None) -> dict[str, Any]:
 
     aoa_min = float(min(aoa))
     aoa_max = float(max(aoa))
+    aoa_sorted = all(aoa[i] <= aoa[i + 1] for i in range(len(aoa) - 1))
     used_indices: set[int] = set()
     samples: list[dict[str, float | bool]] = []
     for target_aoa in _CURVE_SAMPLE_AOA:
         if target_aoa < aoa_min or target_aoa > aoa_max:
             continue
 
-        idx = min(range(len(aoa)), key=lambda i: abs(aoa[i] - target_aoa))
+        if aoa_sorted:
+            insert_at = bisect_left(aoa, target_aoa)
+            candidate_indices = []
+            if insert_at < len(aoa):
+                candidate_indices.append(insert_at)
+            if insert_at > 0:
+                candidate_indices.append(insert_at - 1)
+            idx = min(candidate_indices, key=lambda i: (abs(aoa[i] - target_aoa), i))
+        else:
+            idx = min(range(len(aoa)), key=lambda i: abs(aoa[i] - target_aoa))
         if idx in used_indices:
             continue
         used_indices.add(idx)

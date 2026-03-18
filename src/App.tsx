@@ -11,6 +11,8 @@ import type {
   ProviderId,
   SaveSnapshotCompareResponse,
   SaveSnapshotRecord,
+  SummaryAnalysisResult,
+  SummaryAnalysisState,
   SummaryAppState,
   SolverId,
   WingState,
@@ -194,6 +196,16 @@ const MODEL_CATALOG_BY_PROVIDER = PROVIDER_ORDER.reduce(
   },
   {} as Record<ProviderId, ModelCard[]>,
 );
+const MODEL_BY_ID = new Map(MODEL_CATALOG.map((card) => [card.id, card] as const));
+const FIRST_MODEL_BY_PROVIDER = PROVIDER_ORDER.reduce(
+  (out, providerId) => {
+    const preferred = DEFAULT_MODEL_BY_PROVIDER[providerId];
+    const preferredCard = preferred ? MODEL_BY_ID.get(preferred) : undefined;
+    out[providerId] = preferredCard?.id || MODEL_CATALOG_BY_PROVIDER[providerId][0]?.id || MODEL_CATALOG[0].id;
+    return out;
+  },
+  {} as Record<ProviderId, string>,
+);
 
 type RefreshOutcome = {
   summaryError: Error | null;
@@ -241,24 +253,68 @@ function tabNeedsDetail(tab: TabId): boolean {
 }
 
 function findModelById(modelId: string): ModelCard | undefined {
-  return MODEL_CATALOG.find((m) => m.id === modelId);
+  return MODEL_BY_ID.get(modelId);
 }
 
 function firstModelForProvider(provider: ProviderId): string {
-  const preferred = findModelById(DEFAULT_MODEL_BY_PROVIDER[provider]);
-  if (preferred) return preferred.id;
-  const hit = MODEL_CATALOG.find((m) => m.provider === provider);
-  return hit ? hit.id : MODEL_CATALOG[0].id;
+  return FIRST_MODEL_BY_PROVIDER[provider] || MODEL_CATALOG[0].id;
 }
 
 function modelById(modelId: string, providerFallback?: ProviderId): ModelCard {
   const hit = findModelById(modelId);
   if (hit) return hit;
   if (providerFallback) {
-    const providerHit = MODEL_CATALOG.find((m) => m.provider === providerFallback);
+    const providerHit = MODEL_BY_ID.get(firstModelForProvider(providerFallback));
     if (providerHit) return providerHit;
   }
   return MODEL_CATALOG[0];
+}
+
+function emptyCurve() {
+  return { aoa_deg: [], cl: [], cd: [], cm: [] };
+}
+
+function inflateSummaryResult(result: SummaryAnalysisResult | null) {
+  if (!result) return null;
+  return {
+    ...result,
+    curve: emptyCurve(),
+  };
+}
+
+function mergeSummaryAnalysisIntoDetail(prev: AppState | null, summaryAnalysis: SummaryAnalysisState): AppState | null {
+  if (!prev) return null;
+  return {
+    ...prev,
+    analysis: {
+      active_solver: summaryAnalysis.active_solver,
+      conditions: { ...summaryAnalysis.conditions },
+      results: {
+        openvsp: inflateSummaryResult(summaryAnalysis.results.openvsp),
+        neuralfoil: inflateSummaryResult(summaryAnalysis.results.neuralfoil),
+      },
+    },
+  };
+}
+
+function mergeActiveSolverIntoDetail(prev: AppState | null, activeSolver: SolverId): AppState | null {
+  if (!prev) return null;
+  return {
+    ...prev,
+    analysis: {
+      ...prev.analysis,
+      active_solver: activeSolver,
+    },
+  };
+}
+
+function hasFullCurveData(state: AppState | null, solver: SolverId): boolean {
+  const result = state?.analysis.results[solver];
+  return Boolean(result && result.curve.aoa_deg.length && result.curve.cl.length && result.curve.cd.length);
+}
+
+function singleAppliedCommandType(commands: Array<{ type: string }>): string | null {
+  return commands.length === 1 ? commands[0]?.type || null : null;
 }
 
 function readProviderConfig(): Record<ProviderId, ProviderConfig> {
@@ -473,6 +529,16 @@ export default function App() {
     setDetailState(null);
   }
 
+  function applySummaryAnalysisState(nextState: SummaryAppState) {
+    setSummaryState(nextState);
+    setDetailState((prev) => mergeSummaryAnalysisIntoDetail(prev, nextState.analysis));
+  }
+
+  function applySummaryActiveSolver(nextState: SummaryAppState) {
+    setSummaryState(nextState);
+    setDetailState((prev) => mergeActiveSolverIntoDetail(prev, nextState.analysis.active_solver));
+  }
+
   async function syncDetailIfVisible() {
     if (!tabNeedsDetail(activeTab)) return null;
     const detail = await refreshDetailState({ clearOnFailure: true });
@@ -531,7 +597,19 @@ export default function App() {
         base_url: cfg.baseUrl,
         api_key: cfg.apiKey,
       });
-      if (res.applied_commands.length > 0) {
+      const singleCommandType = singleAppliedCommandType(res.applied_commands);
+      if (singleCommandType === 'SetAnalysisConditions') {
+        applySummaryAnalysisState(res.state);
+      } else if (singleCommandType === 'SetActiveSolver') {
+        const shouldFetchDetail =
+          tabNeedsDetail(activeTab) &&
+          hasAnyAnalysis(res.state) &&
+          !hasFullCurveData(detailState, res.state.analysis.active_solver);
+        applySummaryActiveSolver(res.state);
+        if (shouldFetchDetail) {
+          await syncDetailIfVisible();
+        }
+      } else if (res.applied_commands.length > 0) {
         applySummaryState(res.state);
         await syncDetailIfVisible();
       } else {
@@ -684,8 +762,14 @@ export default function App() {
   async function onSelectActiveSolver(solver: SolverId) {
     try {
       const res = await bridge.command({ command: { type: 'SetActiveSolver', payload: { solver } } });
-      applySummaryState(res.state);
-      await syncDetailIfVisible();
+      const shouldFetchDetail =
+        tabNeedsDetail(activeTab) &&
+        hasAnyAnalysis(res.state) &&
+        !hasFullCurveData(detailState, res.state.analysis.active_solver);
+      applySummaryActiveSolver(res.state);
+      if (shouldFetchDetail) {
+        await syncDetailIfVisible();
+      }
     } catch (err: any) {
       appendAssistantMessage(`해석 결과 전환 실패: ${err?.message || String(err)}`);
     }
@@ -695,8 +779,7 @@ export default function App() {
     setIsUpdatingConditions(true);
     try {
       const res = await bridge.command({ command: { type: 'SetAnalysisConditions', payload: conditions } });
-      applySummaryState(res.state);
-      await syncDetailIfVisible();
+      applySummaryAnalysisState(res.state);
       appendAssistantMessage('해석 조건을 업데이트했어요.');
     } catch (err: any) {
       appendAssistantMessage(`해석 조건 업데이트 실패: ${err?.message || String(err)}`);

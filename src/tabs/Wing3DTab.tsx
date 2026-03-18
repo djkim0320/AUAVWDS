@@ -10,26 +10,82 @@ type Props = {
   isExporting: boolean;
 };
 
-const TXT_PREVIEW_RENDER = '프리뷰 렌더링';
-const TXT_EXPORT_LIMIT = 'VSP3 내보내기는 실제 OpenVSP 결과가 있을 때만 제공됩니다.';
+type ScaleBarState = {
+  pixels: number;
+  label: string;
+};
+
+const TXT_PREVIEW_RENDER = '3D 미리보기';
+const TXT_EXPORT_LIMIT = 'VSP3 내보내기는 실제 OpenVSP 결과가 있을 때만 지원합니다.';
 const TXT_OPENVSP_LINKED = 'OpenVSP 결과 연동';
 const TXT_NEURALFOIL_LINKED = 'NeuralFoil 결과 연동';
 const TXT_FALLBACK_RESULT = '대체 해석 결과';
 const TXT_NO_VSP3_FOR_FALLBACK = '실제 OpenVSP 결과가 아니어서 VSP3 내보내기를 사용할 수 없습니다.';
-const TXT_OPENVSP_WITH_VSP3 = 'VSP3 파일이 포함된 실제 OpenVSP 결과입니다.';
-const TXT_OPENVSP_NO_VSP3 = '실제 OpenVSP 결과이지만 VSP3 파일을 찾을 수 없습니다.';
-const TXT_NEURALFOIL_NOTE = 'NeuralFoil은 2D 에어포일 polar 기반의 날개 추정 결과를 제공합니다.';
+const TXT_OPENVSP_WITH_VSP3 = 'VSP3 파일을 포함한 실제 OpenVSP 결과입니다.';
+const TXT_OPENVSP_NO_VSP3 = '실제 OpenVSP 결과지만 VSP3 파일은 찾을 수 없습니다.';
+const TXT_NEURALFOIL_NOTE = 'NeuralFoil은 2D 에어포일 polar 기반의 3D 추정 결과를 제공합니다.';
 const TXT_EXPORTING = '내보내는 중...';
 const TXT_EXPORT = '내보내기';
-const TXT_EMPTY_WING = '아직 날개 3D 모델이 없습니다. 채팅에서 설계를 요청해 주세요.';
+const TXT_EMPTY_WING = '아직 3D 모델이 없습니다. 채팅에서 날개를 요청해 주세요.';
 
 function wingtipStyleLabel(style: WingtipStyle): string {
-  return style === 'pinched' ? '조임형' : '직선형';
+  return style === 'pinched' ? '조임 끝단' : '직선 끝단';
+}
+
+const SCALE_BAR_TARGET_PX = 164;
+const SCALE_BAR_MIN_PX = 112;
+const SCALE_BAR_MAX_PX = 260;
+
+function formatScaleLabel(lengthM: number): string {
+  if (lengthM >= 1) {
+    const rounded = Number(lengthM.toFixed(lengthM >= 10 ? 0 : 1));
+    return `${rounded}m`;
+  }
+  if (lengthM >= 0.1) {
+    return `${Number(lengthM.toFixed(2))}m`;
+  }
+  return `${Math.round(lengthM * 100)}cm`;
+}
+
+function buildScaleBarState(camera: THREE.PerspectiveCamera, host: HTMLDivElement, focusPoint: THREE.Vector3): ScaleBarState {
+  const viewportWidth = Math.max(host.clientWidth, 1);
+  const distance = Math.max(camera.position.distanceTo(focusPoint), 0.001);
+  const effectiveFovRad = THREE.MathUtils.degToRad(camera.getEffectiveFOV());
+  const visibleHeight = 2 * Math.tan(effectiveFovRad / 2) * distance;
+  const visibleWidth = visibleHeight * camera.aspect;
+  const worldPerPixel = visibleWidth / viewportWidth;
+
+  if (!Number.isFinite(worldPerPixel) || worldPerPixel <= 0) {
+    return { pixels: SCALE_BAR_TARGET_PX, label: '0.2m' };
+  }
+
+  const targetLength = worldPerPixel * SCALE_BAR_TARGET_PX;
+  const exponent = Math.floor(Math.log10(targetLength || 1));
+  const candidates: Array<{ lengthM: number; pixels: number; score: number }> = [];
+
+  for (let power = exponent - 3; power <= exponent + 3; power += 1) {
+    const base = 10 ** power;
+    for (const multiplier of [1, 2, 5]) {
+      const lengthM = multiplier * base;
+      const pixels = lengthM / worldPerPixel;
+      const withinPreferredRange = pixels >= SCALE_BAR_MIN_PX && pixels <= SCALE_BAR_MAX_PX;
+      const score = Math.abs(pixels - SCALE_BAR_TARGET_PX) + (withinPreferredRange ? 0 : 1000);
+      candidates.push({ lengthM, pixels, score });
+    }
+  }
+
+  candidates.sort((a, b) => a.score - b.score);
+  const best = candidates[0];
+  return {
+    pixels: Math.max(1, Math.round(best.pixels)),
+    label: formatScaleLabel(best.lengthM),
+  };
 }
 
 function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>('obj');
+  const [scaleBar, setScaleBar] = useState<ScaleBarState>({ pixels: SCALE_BAR_TARGET_PX, label: '0.2m' });
 
   const precisionMeta = useMemo(() => {
     const openvspResult = analysis.results.openvsp;
@@ -100,6 +156,11 @@ function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: Props) {
     controls.dampingFactor = 0.06;
     controls.target.set(0, 0.05, 0);
 
+    const updateScaleBar = () => {
+      const next = buildScaleBarState(camera, host, controls.target);
+      setScaleBar((prev) => (prev.pixels === next.pixels && prev.label === next.label ? prev : next));
+    };
+
     const grid = new THREE.GridHelper(12, 20, 0x2b5079, 0x14314d);
     grid.position.y = -0.05;
     scene.add(grid);
@@ -142,6 +203,9 @@ function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: Props) {
       controls.update();
     }
 
+    updateScaleBar();
+    controls.addEventListener('change', updateScaleBar);
+
     let raf = 0;
     const loop = () => {
       raf = requestAnimationFrame(loop);
@@ -154,12 +218,14 @@ function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: Props) {
       camera.aspect = host.clientWidth / host.clientHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(host.clientWidth, host.clientHeight);
+      updateScaleBar();
     };
     window.addEventListener('resize', onResize);
 
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
+      controls.removeEventListener('change', updateScaleBar);
       controls.dispose();
       renderer.dispose();
       host.removeChild(renderer.domElement);
@@ -199,15 +265,15 @@ function Wing3DTab({ wing, analysis, onExportCfd, isExporting }: Props) {
       <div className="wing-meta">
         <span>스팬: {wing.params.span_m.toFixed(2)}m</span>
         <span>세장비: {wing.params.aspect_ratio.toFixed(1)}</span>
-        <span>스윕: {wing.params.sweep_deg.toFixed(1)}도</span>
-        <span>윙팁: {wingtipStyleLabel(wing.params.wingtip_style)}</span>
+        <span>후퇴각: {wing.params.sweep_deg.toFixed(1)}°</span>
+        <span>날개끝: {wingtipStyleLabel(wing.params.wingtip_style)}</span>
       </div>
 
       <div className="three-host" ref={hostRef}>
         {!wing.preview_mesh && <div className="empty-state">{TXT_EMPTY_WING}</div>}
         <div className="scale-overlay">
-          <div className="scale-line"></div>
-          <div className="scale-text">0.2m</div>
+          <div className="scale-line" style={{ width: `${scaleBar.pixels}px` }}></div>
+          <div className="scale-text">{scaleBar.label}</div>
         </div>
       </div>
     </div>

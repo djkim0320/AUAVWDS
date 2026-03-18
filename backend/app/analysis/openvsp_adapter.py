@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from app.analysis.common import AeroInputs, build_surrogate_curve, derive_metrics
+from app.geometry.wing_builder import PINCHED_TIP_BLEND, pinched_tip_end_chord
 from app.models.state import AeroCurve, AirfoilState, AnalysisResult, AppState, source_label_for
 
 
@@ -53,6 +54,8 @@ _POLAR_FAMILY_SPECS: tuple[dict[str, Any], ...] = (
         },
     },
 )
+_OPENVSP_ROOT_BLEND_SPAN_MIN = 0.001
+_OPENVSP_ROOT_BLEND_SPAN_RATIO = 0.02
 
 
 def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[str, Any] | None = None) -> AnalysisResult:
@@ -210,15 +213,23 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             scripted_re_cref=case.get("scripted_re_cref"),
             fallback_mach=mach,
         )
+        sref_used = _positive_float(solver_effective_conditions.get("sref")) or case["sref"]
+        cref_used = _positive_float(solver_effective_conditions.get("cref")) or case["cref"]
+        bref_used = _positive_float(solver_effective_conditions.get("bref")) or case["bref"]
         effective_reynolds = solver_effective_conditions.get("re_cref")
         re_used = (
             float(effective_reynolds)
             if isinstance(effective_reynolds, (int, float)) and float(effective_reynolds) > 0
-            else _estimate_reynolds(case["cref"], mach)
+            else _estimate_reynolds(cref_used, mach)
         )
-        metrics = derive_metrics(curve, reynolds=re_used, oswald=_estimate_oswald(params.aspect_ratio, params.sweep_deg, params.taper_ratio))
+        oswald_default = _estimate_oswald(params.aspect_ratio, params.sweep_deg, params.taper_ratio)
+        oswald_used, oswald_source = _resolve_oswald_from_curve_rows(
+            curve_payload["summary_rows"],
+            fallback=oswald_default,
+        )
+        metrics = derive_metrics(curve, reynolds=re_used, oswald=oswald_used)
         precision_data = _build_precision_data(
-            curve, metrics, case["sref"], case["cref"], case["bref"], raw_aoa=raw_aoa_all
+            curve, metrics, sref_used, cref_used, bref_used, raw_aoa=raw_aoa_all
         )
         vspaero_all_data = curve_payload.get("vspaero_all_data") or _build_vspaero_all_data_from_rows(curve_payload["summary_rows"])
         vspaero_all_data_raw = curve_payload.get("vspaero_all_data_raw") or {}
@@ -250,16 +261,19 @@ def run_precision_analysis(state: AppState, work_dir: str | Path, payload: dict[
             "coefficient_family_selection": curve_payload.get("coefficient_family_selection"),
             "selected_coefficient_columns": curve_payload.get("selected_coefficient_columns"),
             "coefficient_family_candidates": curve_payload.get("coefficient_family_candidates"),
-            "Sref": case["sref"],
-            "Cref": case["cref"],
-            "Bref": case["bref"],
+            "Sref": sref_used,
+            "Cref": cref_used,
+            "Bref": bref_used,
             "result_level": "wing_solver",
             "analysis_conditions": conditions.model_dump(),
             "solver_effective_conditions": solver_effective_conditions,
             "solver_airfoil": case["solver_airfoil"],
             "solver_wingtip": case["solver_wingtip"],
+            "used_reference_source": solver_effective_conditions.get("reference_source"),
             "used_reynolds": solver_effective_conditions.get("re_cref"),
             "used_mach": solver_effective_conditions.get("mach"),
+            "used_oswald": oswald_used,
+            "used_oswald_source": oswald_source,
             "precision_data": precision_data,
             "vspaero_all_data": vspaero_all_data,
             "vspaero_all_data_raw": vspaero_all_data_raw,
@@ -384,6 +398,122 @@ def _resolve_solver_paths() -> dict[str, Path | None]:
     return {"bin_dir": None, "vsp_exe": None, "vspaero_exe": None}
 
 
+def _build_openvsp_wingtip_config(
+    *,
+    c_root: float,
+    c_tip: float,
+    semi: float,
+    sweep: float,
+    dihedral: float,
+    twist: float,
+    requested_style: str,
+) -> dict[str, Any]:
+    root_blend_span = min(
+        max(_OPENVSP_ROOT_BLEND_SPAN_MIN, semi * _OPENVSP_ROOT_BLEND_SPAN_RATIO),
+        max(_OPENVSP_ROOT_BLEND_SPAN_MIN, semi * 0.2),
+    )
+
+    if requested_style == "pinched":
+        tip_blend = PINCHED_TIP_BLEND
+        tip_end_chord = pinched_tip_end_chord(c_root, c_tip)
+        semi_mid = max(root_blend_span, semi * tip_blend)
+        main_span = max(_OPENVSP_ROOT_BLEND_SPAN_MIN, semi_mid - root_blend_span)
+        outer_span = max(_OPENVSP_ROOT_BLEND_SPAN_MIN, semi - root_blend_span - main_span)
+        section_specs = [
+            {
+                "index": 1,
+                "group": "XSec_1",
+                "span": main_span,
+                "root_chord": c_root,
+                "tip_chord": c_tip,
+                "sweep": sweep,
+                "dihedral": dihedral,
+                "twist": twist * tip_blend,
+                "sect_tess_u": 20,
+            },
+            {
+                "index": 2,
+                "group": "XSec_2",
+                "span": outer_span,
+                "root_chord": c_tip,
+                "tip_chord": tip_end_chord,
+                "sweep": sweep,
+                "dihedral": dihedral,
+                "twist": twist,
+                "sect_tess_u": 12,
+            },
+        ]
+        return {
+            "requested_style": requested_style,
+            "used_style": "pinched",
+            "geometry_kind": "multi_section_pinched",
+            "section_count": 2,
+            "xsec_count": 3,
+            "tip_blend": tip_blend,
+            "tip_end_chord": tip_end_chord,
+            "root_blend_span": root_blend_span,
+            "section_specs": section_specs,
+            "degraded_note": None,
+        }
+
+    return {
+        "requested_style": requested_style,
+        "used_style": "straight",
+        "geometry_kind": "root_blend_plus_single_taper",
+        "section_count": 1,
+        "xsec_count": 2,
+        "tip_blend": None,
+        "tip_end_chord": None,
+        "root_blend_span": root_blend_span,
+        "section_specs": [
+            {
+                "index": 1,
+                "group": "XSec_1",
+                "span": max(_OPENVSP_ROOT_BLEND_SPAN_MIN, semi - root_blend_span),
+                "root_chord": c_root,
+                "tip_chord": c_tip,
+                "sweep": sweep,
+                "dihedral": dihedral,
+                "twist": twist,
+                "sect_tess_u": 20,
+            }
+        ],
+        "degraded_note": None,
+    }
+
+
+def _build_wing_geometry_script(wingtip_config: dict[str, Any], *, c_root: float) -> str:
+    lines = [
+        '    SetParmVal( wid, "Tess_W", "Shape", 45 );',
+        f'    SetParmVal( wid, "Root_Chord", "XSec_0", {float(c_root):.6f} );',
+        f'    SetParmVal( wid, "Span", "XSec_0", {float(wingtip_config["root_blend_span"]):.6f} );',
+    ]
+    if int(wingtip_config.get("section_count") or 1) > 1:
+        lines.extend(
+            [
+                "    SplitWingXSec( wid, 1 );",
+                "    Update();",
+            ]
+        )
+
+    for section in wingtip_config["section_specs"]:
+        lines.extend(
+            [
+                f'    SetDriverGroup( wid, {int(section["index"])}, SPAN_WSECT_DRIVER, ROOTC_WSECT_DRIVER, TIPC_WSECT_DRIVER );',
+                f'    SetParmVal( wid, "Span", "{section["group"]}", {float(section["span"]):.6f} );',
+                f'    SetParmVal( wid, "Root_Chord", "{section["group"]}", {float(section["root_chord"]):.6f} );',
+                f'    SetParmVal( wid, "Tip_Chord", "{section["group"]}", {float(section["tip_chord"]):.6f} );',
+                f'    SetParmVal( wid, "Sweep", "{section["group"]}", {float(section["sweep"]):.6f} );',
+                f'    SetParmVal( wid, "Dihedral", "{section["group"]}", {float(section["dihedral"]):.6f} );',
+                f'    SetParmVal( wid, "Twist", "{section["group"]}", {float(section["twist"]):.6f} );',
+                f'    SetParmVal( wid, "SectTess_U", "{section["group"]}", {int(section["sect_tess_u"])} );',
+            ]
+        )
+
+    lines.append("    Update();")
+    return "\n".join(lines)
+
+
 def _build_case_geometry(
     params: dict[str, Any],
     solver_airfoil: dict[str, Any],
@@ -408,9 +538,19 @@ def _build_case_geometry(
     requested_wingtip_style = str(params.get("wingtip_style") or "straight").strip().lower()
     if requested_wingtip_style not in ("straight", "pinched"):
         requested_wingtip_style = "straight"
+    wingtip_config = _build_openvsp_wingtip_config(
+        c_root=c_root,
+        c_tip=c_tip,
+        semi=semi,
+        sweep=sweep,
+        dihedral=dihedral,
+        twist=twist,
+        requested_style=requested_wingtip_style,
+    )
 
     alpha_npts = max(2, int(round((aoa_end - aoa_start) / max(0.25, aoa_step))) + 1)
-    airfoil_script = _build_airfoil_script(solver_airfoil)
+    geometry_script = _build_wing_geometry_script(wingtip_config, c_root=c_root)
+    airfoil_script = _build_airfoil_script(solver_airfoil, wingtip_config["xsec_count"])
     reynolds_block = ""
     if reynolds is not None and reynolds > 0:
         reynolds_block = f"""
@@ -432,16 +572,9 @@ def _build_case_geometry(
     string wid = AddGeom( "WING", "" );
     SetParmVal( wid, "Sym_Planar_Flag", "Sym", SYM_XZ );
     SetParmVal( wid, "RotateAirfoilMatchDideralFlag", "WingGeom", 1.0 );
-    SetParmVal( wid, "Span", "XSec_1", {semi:.6f} );
-    SetParmVal( wid, "Root_Chord", "XSec_1", {c_root:.6f} );
-    SetParmVal( wid, "Tip_Chord", "XSec_1", {c_tip:.6f} );
-    SetParmVal( wid, "Sweep", "XSec_1", {sweep:.6f} );
-    SetParmVal( wid, "Dihedral", "XSec_1", {dihedral:.6f} );
-    SetParmVal( wid, "Twist", "XSec_1", {twist:.6f} );
-    SetParmVal( wid, "Tess_W", "Shape", 45 );
-    SetParmVal( wid, "SectTess_U", "XSec_1", 20 );
-    Update();
+{geometry_script}
 {airfoil_script}
+    SetVSPAERORefWingID( wid );
 
     WriteVSPFile( "auav_case.vsp3", SET_ALL );
 
@@ -459,24 +592,16 @@ def _build_case_geometry(
     SetAnalysisInputDefaults( analysis_name );
 
     array< int > geom_set;
-    geom_set.push_back( 0 );
+    geom_set.push_back( SET_ALL );
     SetIntAnalysisInput( analysis_name, "GeomSet", geom_set, 0 );
 
+    array< string > wing_id;
+    wing_id.push_back( wid );
+    SetStringAnalysisInput( analysis_name, "WingID", wing_id, 0 );
+
     array< int > ref_flag;
-    ref_flag.push_back( 0 );
+    ref_flag.push_back( 1 );
     SetIntAnalysisInput( analysis_name, "RefFlag", ref_flag, 0 );
-
-    array< double > sref;
-    sref.push_back( {area:.6f} );
-    SetDoubleAnalysisInput( analysis_name, "Sref", sref, 0 );
-
-    array< double > cref;
-    cref.push_back( {mac:.6f} );
-    SetDoubleAnalysisInput( analysis_name, "cref", cref, 0 );
-
-    array< double > bref;
-    bref.push_back( {span:.6f} );
-    SetDoubleAnalysisInput( analysis_name, "bref", bref, 0 );
 
     array< double > alphaStart;
     alphaStart.push_back( {aoa_start:.6f} );
@@ -521,14 +646,16 @@ def _build_case_geometry(
         "scripted_re_cref": float(reynolds) if reynolds is not None and reynolds > 0 else None,
         "solver_airfoil": solver_airfoil,
         "solver_wingtip": {
-            "requested_style": requested_wingtip_style,
-            "used_style": "straight",
-            "geometry_kind": "single_taper_section",
-            "degraded_note": (
-                "조임형 윙팁 프리뷰는 현재 OpenVSP 해석에서 등가 직선 테이퍼 팁으로 근사합니다."
-                if requested_wingtip_style == "pinched"
-                else None
-            ),
+            "requested_style": wingtip_config["requested_style"],
+            "used_style": wingtip_config["used_style"],
+            "geometry_kind": wingtip_config["geometry_kind"],
+            "section_count": wingtip_config["section_count"],
+            "tip_blend": wingtip_config["tip_blend"],
+            "tip_end_chord": wingtip_config["tip_end_chord"],
+            "root_blend_span": round(float(wingtip_config["root_blend_span"]), 6),
+            "section_spans": [round(float(section["span"]), 6) for section in wingtip_config["section_specs"]],
+            "section_tip_chords": [round(float(section["tip_chord"]), 6) for section in wingtip_config["section_specs"]],
+            "degraded_note": wingtip_config["degraded_note"],
         },
     }
 
@@ -606,35 +733,41 @@ def _naca4_parameters(code: str) -> tuple[float, float, float]:
     return camber, camber_loc, thickness
 
 
-def _build_airfoil_script(solver_airfoil: dict[str, Any]) -> str:
+def _build_airfoil_script(solver_airfoil: dict[str, Any], xsec_count: int) -> str:
+    xsec_count = max(2, int(xsec_count))
     geometry_kind = str(solver_airfoil.get("geometry_kind") or "")
     if geometry_kind in {"naca4", "naca4_approx"}:
         camber = float(solver_airfoil["camber"])
         camber_loc = float(solver_airfoil["camber_loc"])
         thickness = float(solver_airfoil["thickness"])
-        return f"""    string xsec_surf = GetXSecSurf( wid, 0 );
-    ChangeXSecShape( xsec_surf, 0, XS_FOUR_SERIES );
-    ChangeXSecShape( xsec_surf, 1, XS_FOUR_SERIES );
-    Update();
-    string xsec0 = GetXSec( xsec_surf, 0 );
-    string xsec1 = GetXSec( xsec_surf, 1 );
-    SetParmVal( GetXSecParm( xsec0, "Camber" ), {camber:.6f} );
-    SetParmVal( GetXSecParm( xsec0, "CamberLoc" ), {camber_loc:.6f} );
-    SetParmVal( GetXSecParm( xsec0, "ThickChord" ), {thickness:.6f} );
-    SetParmVal( GetXSecParm( xsec1, "Camber" ), {camber:.6f} );
-    SetParmVal( GetXSecParm( xsec1, "CamberLoc" ), {camber_loc:.6f} );
-    SetParmVal( GetXSecParm( xsec1, "ThickChord" ), {thickness:.6f} );
-    Update();"""
+        lines = ['    string xsec_surf = GetXSecSurf( wid, 0 );']
+        for idx in range(xsec_count):
+            lines.append(f"    ChangeXSecShape( xsec_surf, {idx}, XS_FOUR_SERIES );")
+        lines.append("    Update();")
+        for idx in range(xsec_count):
+            lines.extend(
+                [
+                    f"    string xsec{idx} = GetXSec( xsec_surf, {idx} );",
+                    f'    SetParmVal( GetXSecParm( xsec{idx}, "Camber" ), {camber:.6f} );',
+                    f'    SetParmVal( GetXSecParm( xsec{idx}, "CamberLoc" ), {camber_loc:.6f} );',
+                    f'    SetParmVal( GetXSecParm( xsec{idx}, "ThickChord" ), {thickness:.6f} );',
+                ]
+            )
+        lines.append("    Update();")
+        return "\n".join(lines)
 
     file_name = _vsp_string(str(solver_airfoil.get("file_name") or "solver_airfoil.af"))
-    return f"""    string xsec_surf = GetXSecSurf( wid, 0 );
-    ChangeXSecShape( xsec_surf, 0, XS_FILE_AIRFOIL );
-    string xsec0 = GetXSec( xsec_surf, 0 );
-    ReadFileAirfoil( xsec0, "{file_name}" );
-    ChangeXSecShape( xsec_surf, 1, XS_FILE_AIRFOIL );
-    string xsec1 = GetXSec( xsec_surf, 1 );
-    ReadFileAirfoil( xsec1, "{file_name}" );
-    Update();"""
+    lines = ['    string xsec_surf = GetXSecSurf( wid, 0 );']
+    for idx in range(xsec_count):
+        lines.extend(
+            [
+                f"    ChangeXSecShape( xsec_surf, {idx}, XS_FILE_AIRFOIL );",
+                f"    string xsec{idx} = GetXSec( xsec_surf, {idx} );",
+                f'    ReadFileAirfoil( xsec{idx}, "{file_name}" );',
+            ]
+        )
+    lines.append("    Update();")
+    return "\n".join(lines)
 
 
 def _write_airfoil_file(path: Path, label: str, coords: list[list[float]]) -> None:
@@ -700,6 +833,10 @@ def _build_openvsp_notes(
     tip_note = wingtip.get("degraded_note")
     if isinstance(tip_note, str) and tip_note.strip():
         base = f"{base} {tip_note}"
+    elif str(wingtip.get("used_style") or "").strip().lower() == "pinched":
+        section_count = int(wingtip.get("section_count") or 0)
+        if section_count > 1:
+            base = f"{base} 조임형 윙팁은 OpenVSP 다중 섹션 형상으로 반영했습니다."
 
     return f"{base}{suffix}"
 
@@ -1263,9 +1400,42 @@ def _estimate_oswald(ar: float, sweep_deg: float, taper: float) -> float:
     return max(0.55, min(0.95, e))
 
 
+def _resolve_oswald_from_curve_rows(rows: list[dict[str, float]], *, fallback: float) -> tuple[float, str]:
+    positive_entries: list[tuple[float, float]] = []
+    for row in rows:
+        e_value = row.get("e")
+        ld_value = row.get("ld")
+        if not isinstance(e_value, (int, float)) or not math.isfinite(float(e_value)):
+            continue
+        e_numeric = float(e_value)
+        if e_numeric < 0.4 or e_numeric > 1.5:
+            continue
+        ld_numeric = float(ld_value) if isinstance(ld_value, (int, float)) and math.isfinite(float(ld_value)) else float("-inf")
+        positive_entries.append((e_numeric, ld_numeric))
+
+    if not positive_entries:
+        return float(fallback), "heuristic_estimate"
+
+    best_by_ld = max(positive_entries, key=lambda item: item[1])
+    if math.isfinite(best_by_ld[1]):
+        return float(best_by_ld[0]), "selected_family_ld_max"
+
+    sorted_e = sorted(item[0] for item in positive_entries)
+    mid = len(sorted_e) // 2
+    if len(sorted_e) % 2:
+        return float(sorted_e[mid]), "selected_family_median"
+    return float((sorted_e[mid - 1] + sorted_e[mid]) * 0.5), "selected_family_median"
+
+
 def _estimate_reynolds(cref: float, mach: float, nu: float = 1.5e-5) -> float:
     speed = max(0.1, float(mach) * 340.3)
     return speed * max(0.02, float(cref)) / max(1e-7, float(nu))
+
+
+def _positive_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)) and float(value) > 0:
+        return float(value)
+    return None
 
 
 def _tail(text: str, lines: int = 40) -> str:
@@ -1353,6 +1523,10 @@ def _extract_solver_effective_conditions(
             aoa_range = {"start": float(min(finite_aoa)), "end": float(max(finite_aoa))}
             aoa_count = len(finite_aoa)
 
+    sref = _positive_float(raw_inputs.get("Sref"))
+    cref = _positive_float(raw_inputs.get("Cref"))
+    bref = _positive_float(raw_inputs.get("Bref"))
+
     tolerance = max(5.0, abs(float(requested_re_value or 0.0)) * 0.01)
     reynolds_applied = bool(
         requested_re_value is not None
@@ -1384,6 +1558,10 @@ def _extract_solver_effective_conditions(
         "wake_iterations": wake_iters,
         "aoa_range": aoa_range,
         "aoa_count": aoa_count,
+        "sref": sref,
+        "cref": cref,
+        "bref": bref,
+        "reference_source": "vspaero_case_file" if any(value is not None for value in (sref, cref, bref)) else "script_geometry_estimate",
     }
 
 

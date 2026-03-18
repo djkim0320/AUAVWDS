@@ -179,6 +179,9 @@ export interface AnalysisExtraData extends Record<string, unknown> {
   requested_aoa_range?: AoaRange | null;
   valid_aoa_range?: AoaRange | null;
   curve_filtering?: CurveFilteringInfo;
+  used_reference_source?: string;
+  used_oswald?: number;
+  used_oswald_source?: string;
   reference_values_used?: ReferenceValuesUsed;
   precision_data?: Record<string, unknown>;
   vspaero_all_data?: Record<string, unknown>;

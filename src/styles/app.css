@@ -809,26 +809,25 @@ button.ghost,
 
 .scale-overlay {
   position: absolute;
-  right: 20px;
-  bottom: 18px;
+  right: 24px;
+  bottom: 22px;
   pointer-events: none;
   text-align: center;
 }
 
 .scale-line {
-  width: 82px;
-  border-top: 2px solid #9fc9f6;
+  border-top: 3px solid #9fc9f6;
   position: relative;
-  margin: 0 auto 4px;
+  margin: 0 auto 8px;
 }
 
 .scale-line::before,
 .scale-line::after {
   content: '';
   position: absolute;
-  top: -5px;
-  width: 2px;
-  height: 10px;
+  top: -7px;
+  width: 3px;
+  height: 14px;
   background: #9fc9f6;
 }
 
@@ -841,7 +840,9 @@ button.ghost,
 }
 
 .scale-text {
-  font-size: 11px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
   color: #8fb6de;
 }
 

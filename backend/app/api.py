@@ -73,6 +73,44 @@ _SAVE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _EXPORT_SUFFIXES = {".obj", ".json", ".vsp3"}
 
 
+def _build_client_state(state: AppState) -> ClientAppState:
+    return serialize_client_state(enrich_state_with_fair_comparison(state))
+
+
+def _build_client_state_response_from_enriched(
+    enriched_state: AppState,
+    *,
+    applied_commands: list[CommandEnvelope] | None = None,
+    explanation: str,
+    assistant_message: str | None = None,
+    warnings: list[str] | None = None,
+) -> ClientStateResponse:
+    return ClientStateResponse(
+        state=serialize_client_state(enriched_state),
+        applied_commands=applied_commands or [],
+        explanation=explanation,
+        warnings=warnings or [],
+        assistant_message=assistant_message,
+    )
+
+
+def _build_client_state_response(
+    state: AppState,
+    *,
+    applied_commands: list[CommandEnvelope] | None = None,
+    explanation: str,
+    assistant_message: str | None = None,
+    warnings: list[str] | None = None,
+) -> ClientStateResponse:
+    return _build_client_state_response_from_enriched(
+        enrich_state_with_fair_comparison(state),
+        applied_commands=applied_commands or [],
+        explanation=explanation,
+        warnings=warnings or [],
+        assistant_message=assistant_message,
+    )
+
+
 def create_app(work_dir: Path) -> FastAPI:
     app = FastAPI(title="AUAVWDS Backend", version="0.2.0")
 
@@ -104,17 +142,15 @@ def create_app(work_dir: Path) -> FastAPI:
 
     @app.get("/state/client", response_model=ClientAppState)
     def client_state() -> ClientAppState:
-        return serialize_client_state(enrich_state_with_fair_comparison(store.get()))
+        return _build_client_state(store.get())
 
     @app.post("/reset", response_model=ClientStateResponse)
     def reset() -> ClientStateResponse:
         s, _ = store.transact(lambda _state: (AppState(), None))
-        enriched = enrich_state_with_fair_comparison(s)
-        return ClientStateResponse(
-            state=serialize_client_state(enriched),
+        return _build_client_state_response(
+            s,
             applied_commands=[CommandEnvelope(type="Reset", payload={})],
             explanation="State reset complete.",
-            warnings=[],
             assistant_message="초기 상태로 리셋했어요.",
         )
 
@@ -126,12 +162,10 @@ def create_app(work_dir: Path) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        enriched = enrich_state_with_fair_comparison(next_state)
-        return ClientStateResponse(
-            state=serialize_client_state(enriched),
+        return _build_client_state_response(
+            next_state,
             applied_commands=[prepared_command],
             explanation=explanation,
-            warnings=[],
             assistant_message=explanation,
         )
 
@@ -164,12 +198,14 @@ def create_app(work_dir: Path) -> FastAPI:
         if not assistant:
             assistant = "모델 응답을 받지 못했어요. 다시 시도해 주세요."
 
-        enriched = enrich_state_with_fair_comparison(state)
-        return ClientStateResponse(
-            state=serialize_client_state(enriched),
+        enriched_state = chat_meta.get("enriched_state")
+        if not isinstance(enriched_state, AppState):
+            enriched_state = enrich_state_with_fair_comparison(state)
+
+        return _build_client_state_response_from_enriched(
+            enriched_state,
             applied_commands=applied_commands,
             explanation=assistant,
-            warnings=[],
             assistant_message=assistant,
         )
 
@@ -198,12 +234,10 @@ def create_app(work_dir: Path) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         loaded_state, _ = store.transact(lambda _state: (loaded, None))
-        enriched = enrich_state_with_fair_comparison(loaded_state)
-        return ClientStateResponse(
-            state=serialize_client_state(enriched),
+        return _build_client_state_response(
+            loaded_state,
             applied_commands=[CommandEnvelope(type="Reset", payload={})],
             explanation="Saved snapshot loaded.",
-            warnings=[],
             assistant_message="저장한 상태를 불러왔어요.",
         )
 
@@ -283,22 +317,22 @@ def _run_chat_transaction(
 ) -> tuple[AppState, dict[str, Any]]:
     applied_commands: list[CommandEnvelope] = []
     tool_messages: list[str] = []
+    last_enriched_state = enrich_state_with_fair_comparison(state)
 
     def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
-        nonlocal state
+        nonlocal state, last_enriched_state
         cmd = CommandEngine.command_from_tool(name, args)
         state, explanation = engine.execute_prepared(state, cmd)
         applied_commands.append(cmd)
         tool_messages.append(explanation)
-        enriched = enrich_state_with_fair_comparison(state)
+        last_enriched_state = enrich_state_with_fair_comparison(state)
         return {
             "ok": True,
             "command": cmd.type,
             "message": explanation,
-            "state_summary": build_llm_state_summary(enriched),
+            "state_summary": build_llm_state_summary(last_enriched_state),
         }
 
-    initial_summary_state = enrich_state_with_fair_comparison(state)
     llm_out = llm.run_agent_turn(
         provider=req.provider,
         model=req.model,
@@ -306,7 +340,7 @@ def _run_chat_transaction(
         api_key=req.api_key,
         history=history,
         message=req.message,
-        state_summary=build_llm_state_summary(initial_summary_state),
+        state_summary=build_llm_state_summary(last_enriched_state),
         tool_executor=execute_tool,
     )
 
@@ -315,6 +349,7 @@ def _run_chat_transaction(
         "assistant": assistant,
         "applied_commands": applied_commands,
         "tool_messages": tool_messages,
+        "enriched_state": last_enriched_state,
     }
 
 

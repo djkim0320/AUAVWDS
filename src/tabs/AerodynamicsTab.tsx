@@ -19,18 +19,16 @@ const CHART_CONFIGS = [
   { key: 'ld', title: '양항비 (L/D)', color: '#efb35b', yName: 'L/D' },
   { key: 'cd', title: '항력계수 (CD)', color: '#6ce8be', yName: 'CD' },
 ] as const;
-const COMPARISON_BLOCKER_LABELS: Record<string, string> = {
-  missing_counterpart_result: 'Other solver result is missing',
-  fallback_result_present: 'A fallback result is present',
-  analysis_condition_mismatch: 'Requested analysis conditions do not match',
-  reynolds_mismatch: 'Effective Reynolds do not match',
-  no_effective_reynolds_in_vspaero: 'VSPAERO effective Reynolds is unavailable',
-  no_valid_aoa_overlap: 'No trustworthy shared AoA window',
-  reference_value_mismatch: 'Reference values differ',
-  geometry_mismatch: 'Geometry snapshot differs',
-  unsupported_airfoil_parity: 'Airfoil parity is not supported cleanly',
-  coefficient_family_unstable: 'Selected VSPAERO coefficient family is unstable',
+
+type Props = {
+  analysis: AnalysisState;
+  onRunAnalysis: (solver: SolverId) => Promise<void>;
+  onSelectSolver: (solver: SolverId) => Promise<void>;
+  onUpdateConditions: (conditions: AnalysisConditions) => Promise<void>;
+  isRunningAnalysis: boolean;
+  isUpdatingConditions: boolean;
 };
+
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, v));
@@ -125,9 +123,6 @@ function humanizeVspaeroKey(key: string): string {
   return `${label}${suffix}`;
 }
 
-function comparisonBlockerLabel(key: string): string {
-  return COMPARISON_BLOCKER_LABELS[key] || key.replace(/_/gu, ' ');
-}
 
 function preferredResult(analysis: AnalysisState): { solver: SolverId | null; result: AnalysisResult | null } {
   const active = analysis.results[analysis.active_solver];
@@ -136,15 +131,6 @@ function preferredResult(analysis: AnalysisState): { solver: SolverId | null; re
   if (analysis.results.neuralfoil) return { solver: 'neuralfoil', result: analysis.results.neuralfoil };
   return { solver: null, result: null };
 }
-
-type Props = {
-  analysis: AnalysisState;
-  onRunAnalysis: (solver: SolverId) => Promise<void>;
-  onSelectSolver: (solver: SolverId) => Promise<void>;
-  onUpdateConditions: (conditions: AnalysisConditions) => Promise<void>;
-  isRunningAnalysis: boolean;
-  isUpdatingConditions: boolean;
-};
 
 type ChartSeries = {
   key: string;
@@ -196,7 +182,7 @@ function AerodynamicsTab({
       extra.coefficient_family_selection === 'dynamic_family_selection'
         ? '동적 선택'
         : extra.coefficient_family_selection === 'stdout_single_family'
-          ? 'stdout 단일 표'
+          ? 'stdout 단일 계열'
           : '-';
     const solverEffectiveConditions = (extra.solver_effective_conditions || null) as SolverEffectiveConditions | null;
     const referenceValues = (extra.reference_values_used || null) as ReferenceValuesUsed | null;
@@ -275,8 +261,8 @@ function AerodynamicsTab({
     const metrics = result?.metrics;
     return [
       { title: '최대 양항비 (L/D)', value: fmt(metrics?.ld_max, 1), desc: '높을수록 효율적입니다.', emphasize: true },
-      { title: '최적 받음각', value: `${fmt(metrics?.ld_max_aoa, 1)}도`, desc: 'L/D가 최대인 지점' },
-      { title: '최대 양력 각도', value: `${fmt(metrics?.cl_max_aoa, 1)}도`, desc: 'CL이 최대인 지점' },
+      { title: '최적 받음각', value: `${fmt(metrics?.ld_max_aoa, 1)}°`, desc: 'L/D가 최대가 되는 지점' },
+      { title: '최대 양력 각도', value: `${fmt(metrics?.cl_max_aoa, 1)}°`, desc: 'CL이 최대가 되는 지점' },
       { title: '최대 CL', value: fmt(metrics?.cl_max, 3), desc: '최대 양력계수' },
     ];
   }, [result]);
@@ -298,7 +284,7 @@ function AerodynamicsTab({
         title: '양력 특성',
         rows: [
           { label: '양력 곡선 기울기 (CL_alpha)', value: `${fmt(metrics?.cl_alpha, 2)} /rad` },
-          { label: '영양력 받음각', value: `${fmt(metrics?.alpha_zero_lift, 2)}도` },
+          { label: '영양력 받음각', value: `${fmt(metrics?.alpha_zero_lift, 2)}°` },
         ],
       },
       {
@@ -435,48 +421,8 @@ function AerodynamicsTab({
             )}
             {provenance.limitationNote && <div className="solver-note provenance-note">{provenance.limitationNote}</div>}
           </div>
-          <div className="provenance-card">
-            <div className="provenance-title">Fair comparison</div>
-            <div className="kv"><span>Status</span><strong>{provenance.comparisonReady ? 'Ready' : 'Blocked'}</strong></div>
-            <div className="kv"><span>Counterpart</span><strong>{provenance.comparisonCounterpart || '-'}</strong></div>
-            <div className="kv"><span>Comparison AoA window</span><strong>{fmtAoaRange(provenance.comparisonWindow)}</strong></div>
-            {!provenance.comparisonReady && (
-              <div className="provenance-artifacts">
-                {provenance.comparisonBlockers.length > 0
-                  ? provenance.comparisonBlockers.map((item) => (
-                      <span key={item} className="metric-chip">{comparisonBlockerLabel(item)}</span>
-                    ))
-                  : <span className="muted">Direct comparison is not available yet.</span>}
-              </div>
-            )}
-            {provenance.comparisonReady && provenance.comparisonMetrics && (
-              <>
-                <div className="kv"><span>Shared points</span><strong>{fmtInt(provenance.comparisonMetrics.point_count ?? null)}</strong></div>
-                <div className="kv"><span>mean |ΔCL|</span><strong>{fmt(provenance.comparisonMetrics.cl_mean_abs_delta, 4)}</strong></div>
-                <div className="kv"><span>mean |ΔCD|</span><strong>{fmt(provenance.comparisonMetrics.cd_mean_abs_delta, 5)}</strong></div>
-                <div className="kv"><span>mean |ΔL/D|</span><strong>{fmt(provenance.comparisonMetrics.ld_mean_abs_delta, 3)}</strong></div>
-                <div className="kv"><span>CL_alpha delta</span><strong>{fmt(provenance.comparisonMetrics.cl_alpha_delta, 3)}</strong></div>
-                <div className="kv"><span>OpenVSP alpha@max L/D</span><strong>{fmt(provenance.comparisonMetrics.ld_max_aoa_openvsp, 2)}°</strong></div>
-                <div className="kv"><span>NeuralFoil alpha@max L/D</span><strong>{fmt(provenance.comparisonMetrics.ld_max_aoa_neuralfoil, 2)}°</strong></div>
-              </>
-            )}
-            {provenance.comparisonSummary && <div className="solver-note provenance-note">{provenance.comparisonSummary}</div>}
-          </div>
         </div>
       )}
-
-      <div className="aero-cards">
-        {metricCards.map((card) => (
-          <Metric key={card.title} title={card.title} value={card.value} desc={card.desc} emphasize={card.emphasize} />
-        ))}
-      </div>
-
-      <div className="metric-chip-row">
-        {chips.map((chip) => (
-          <span key={chip.key} className="metric-chip">{chip.key} <strong>{chip.value}</strong></span>
-        ))}
-      </div>
-
       <div className="chart-grid">
         {chartSeries.map((series) => (
           <Chart
@@ -603,7 +549,7 @@ const ConditionsEditor = memo(function ConditionsEditor({
         {fmtAdaptive(applied.aoa_step, applied.aoa_step, 2, 4)}°.
       </div>
       <div className="solver-note">
-        이 값은 그래프 축이 아니라 solver가 실제로 계산할 받음각 범위입니다. 변경 후 해석을 다시 실행해야 새 결과에 반영됩니다.
+        이 값은 그래프 축이 아니라 solver가 실제로 계산한 받음각 범위입니다. 변경 후 해석을 다시 실행해야 새 결과가 반영됩니다.
       </div>
     </div>
   );
@@ -680,22 +626,22 @@ const Chart = memo(function Chart({
     if (!prepared) return null;
 
     return {
-      backgroundColor: 'transparent',
-      animation: false,
-      grid: { left: 56, right: 20, top: 20, bottom: 44 },
-      xAxis: {
-        type: 'value',
-        name: '받음각(도)',
-        min: xMin,
-        max: xMax,
-        splitNumber: 6,
-        axisLine: { lineStyle: { color: '#28425f' } },
-        splitLine: { lineStyle: { color: '#162a42' } },
-        axisLabel: {
-          color: '#9cb0c8',
-          formatter: (value: number) => fmtAdaptive(Number(value), prepared.xAxisSpan, 1, 5),
-        },
-        nameTextStyle: { color: '#8ea3bc' },
+        backgroundColor: 'transparent',
+        animation: false,
+        grid: { left: 56, right: 20, top: 20, bottom: 44 },
+        xAxis: {
+          type: 'value',
+          name: '받음각 (°)',
+          min: xMin,
+          max: xMax,
+          splitNumber: 6,
+          axisLine: { lineStyle: { color: '#28425f' } },
+          splitLine: { lineStyle: { color: '#162a42' } },
+          axisLabel: {
+            color: '#9cb0c8',
+            formatter: (value: number) => fmtAdaptive(Number(value), prepared.xAxisSpan, 1, 5),
+          },
+          nameTextStyle: { color: '#8ea3bc' },
       },
       yAxis: {
         type: 'value',
@@ -719,7 +665,7 @@ const Chart = memo(function Chart({
         formatter: (params: Array<{ data?: [number, number] }>) => {
           const point = params?.[0]?.data;
           if (!point) return '';
-          return `받음각 ${fmtAdaptive(Number(point[0]), prepared.xAxisSpan, 1, 5)}도<br/>${yName}: ${fmtAdaptive(Number(point[1]), prepared.yAxisSpan, 3, 6)}`;
+          return `받음각 ${fmtAdaptive(Number(point[0]), prepared.xAxisSpan, 1, 5)}°<br/>${yName}: ${fmtAdaptive(Number(point[1]), prepared.yAxisSpan, 3, 6)}`;
         },
       },
       series: [

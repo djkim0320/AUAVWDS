@@ -53,7 +53,7 @@ COMMAND_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "wingtip_style": {
                     "type": "string",
                     "enum": ["straight", "pinched"],
-                    "description": "Wingtip planform style. Use straight as a neutral baseline, or pinched when the mission clearly benefits from a narrowed tip.",
+                    "description": "Wingtip planform style. Keep straight as the default unless the user explicitly asks for a narrowed or pinched tip.",
                 },
             },
             "additionalProperties": False,

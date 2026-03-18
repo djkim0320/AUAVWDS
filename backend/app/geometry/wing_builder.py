@@ -5,6 +5,14 @@ from typing import Iterable
 
 from app.models.state import AirfoilState, Planform2D, WingMesh, WingParams
 
+PINCHED_TIP_BLEND = 0.88
+PINCHED_TIP_END_CHORD_RATIO = 0.32
+PINCHED_TIP_END_CHORD_MIN_ROOT_RATIO = 0.06
+
+
+def pinched_tip_end_chord(c_root: float, c_tip: float) -> float:
+    return max(c_tip * PINCHED_TIP_END_CHORD_RATIO, c_root * PINCHED_TIP_END_CHORD_MIN_ROOT_RATIO)
+
 
 def build_wing_mesh(airfoil: AirfoilState, params: WingParams) -> tuple[WingMesh, Planform2D]:
     if not airfoil.upper or not airfoil.lower:
@@ -24,8 +32,8 @@ def build_wing_mesh(airfoil: AirfoilState, params: WingParams) -> tuple[WingMesh
     c_tip = c_root * taper
     semi = span * 0.5
     wingtip_style = str(params.wingtip_style or 'straight').lower()
-    tip_blend = 0.88
-    tip_end_chord = max(c_tip * 0.32, c_root * 0.06)
+    tip_blend = PINCHED_TIP_BLEND
+    tip_end_chord = pinched_tip_end_chord(c_root, c_tip)
 
     vertices: list[list[float]] = []
     triangles: list[list[int]] = []

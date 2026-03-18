@@ -454,6 +454,76 @@ class PrecisionAnalysisTests(unittest.TestCase):
         self.assertIn('XS_FILE_AIRFOIL', script)
         self.assertIn(solver_file.name, script)
 
+    def test_pinched_wingtip_is_preserved_in_solver_metadata_and_script(self) -> None:
+        state = AppState(airfoil=AirfoilState.model_validate(generate_naca4('2412')))
+        state.wing.params.wingtip_style = 'pinched'
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch(
+            'app.analysis.openvsp_adapter._resolve_solver_paths',
+            return_value={'bin_dir': None, 'vsp_exe': None, 'vspaero_exe': None},
+        ):
+            result = run_precision_analysis(state, Path(tmp_dir))
+            script = Path(result.extra_data['script_path']).read_text(encoding='utf-8')
+
+        wingtip = result.extra_data['solver_wingtip']
+
+        self.assertEqual(result.analysis_mode, 'fallback')
+        self.assertEqual(wingtip['requested_style'], 'pinched')
+        self.assertEqual(wingtip['used_style'], 'pinched')
+        self.assertEqual(wingtip['geometry_kind'], 'multi_section_pinched')
+        self.assertEqual(wingtip['section_count'], 2)
+        self.assertIn('SplitWingXSec( wid, 1 );', script)
+        self.assertIn('SetDriverGroup( wid, 1, SPAN_WSECT_DRIVER, ROOTC_WSECT_DRIVER, TIPC_WSECT_DRIVER );', script)
+        self.assertIn('SetDriverGroup( wid, 2, SPAN_WSECT_DRIVER, ROOTC_WSECT_DRIVER, TIPC_WSECT_DRIVER );', script)
+        self.assertIn('GetXSecParm( xsec2, "Camber" )', script)
+
+    def test_generated_script_binds_vspaero_reference_wing_explicitly(self) -> None:
+        state = AppState(airfoil=AirfoilState.model_validate(generate_naca4('2412')))
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch(
+            'app.analysis.openvsp_adapter._resolve_solver_paths',
+            return_value={'bin_dir': None, 'vsp_exe': None, 'vspaero_exe': None},
+        ):
+            result = run_precision_analysis(state, Path(tmp_dir))
+            script = Path(result.extra_data['script_path']).read_text(encoding='utf-8')
+
+        self.assertIn('SetVSPAERORefWingID( wid );', script)
+        self.assertIn('array< string > wing_id;', script)
+        self.assertIn('SetStringAnalysisInput( analysis_name, "WingID", wing_id, 0 );', script)
+        self.assertIn('ref_flag.push_back( 1 );', script)
+        self.assertIn('SetIntAnalysisInput( analysis_name, "RefFlag", ref_flag, 0 );', script)
+        self.assertNotIn('SetDoubleAnalysisInput( analysis_name, "Sref"', script)
+        self.assertNotIn('SetDoubleAnalysisInput( analysis_name, "cref"', script)
+        self.assertNotIn('SetDoubleAnalysisInput( analysis_name, "bref"', script)
+
+    def test_custom_airfoil_is_applied_to_all_xsecs_for_multi_section_wing(self) -> None:
+        payload = generate_custom_airfoil(
+            max_camber_percent=3.0,
+            max_camber_x_percent=35.0,
+            thickness_percent=11.0,
+            reflex_percent=0.5,
+        )
+        payload['summary']['code'] = 'Mission Custom Airfoil'
+        state = AppState(airfoil=AirfoilState.model_validate(payload))
+        state.wing.params.wingtip_style = 'pinched'
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch(
+            'app.analysis.openvsp_adapter._resolve_solver_paths',
+            return_value={'bin_dir': None, 'vsp_exe': None, 'vspaero_exe': None},
+        ):
+            result = run_precision_analysis(state, Path(tmp_dir))
+            script = Path(result.extra_data['script_path']).read_text(encoding='utf-8')
+
+        self.assertIn('ChangeXSecShape( xsec_surf, 0, XS_FILE_AIRFOIL );', script)
+        self.assertIn('ChangeXSecShape( xsec_surf, 1, XS_FILE_AIRFOIL );', script)
+        self.assertIn('ChangeXSecShape( xsec_surf, 2, XS_FILE_AIRFOIL );', script)
+        self.assertIn('string xsec0 = GetXSec( xsec_surf, 0 );', script)
+        self.assertIn('string xsec1 = GetXSec( xsec_surf, 1 );', script)
+        self.assertIn('string xsec2 = GetXSec( xsec_surf, 2 );', script)
+        self.assertIn('ReadFileAirfoil( xsec0,', script)
+        self.assertIn('ReadFileAirfoil( xsec1,', script)
+        self.assertIn('ReadFileAirfoil( xsec2,', script)
+
     def test_real_solver_and_fallback_results_are_clearly_distinct(self) -> None:
         state = AppState(airfoil=AirfoilState.model_validate(generate_naca4('2412')))
 
@@ -664,6 +734,10 @@ class PrecisionAnalysisTests(unittest.TestCase):
         self.assertEqual(effective['re_cref'], 10000000.0)
         self.assertFalse(effective['reynolds_applied'])
         self.assertEqual(effective['aoa_range'], {'start': -10.0, 'end': 20.0})
+        self.assertAlmostEqual(effective['sref'], 0.064)
+        self.assertAlmostEqual(effective['cref'], 0.081667)
+        self.assertAlmostEqual(effective['bref'], 0.8)
+        self.assertEqual(effective['reference_source'], 'vspaero_case_file')
         self.assertIn('ReCref는 10,000,000', effective['reynolds_note'])
 
     def test_run_precision_applies_requested_reynolds_and_uses_selected_wake_family(self) -> None:
@@ -708,10 +782,23 @@ class PrecisionAnalysisTests(unittest.TestCase):
 
         self.assertIn('SetDoubleAnalysisInput( analysis_name, "ReCref"', captured['script'])
         self.assertIn('70000.000000', captured['script'])
+        self.assertIn('SetVSPAERORefWingID( wid );', captured['script'])
+        self.assertIn('SetStringAnalysisInput( analysis_name, "WingID", wing_id, 0 );', captured['script'])
+        self.assertIn('ref_flag.push_back( 1 );', captured['script'])
+        self.assertNotIn('SetDoubleAnalysisInput( analysis_name, "Sref"', captured['script'])
+        self.assertNotIn('SetDoubleAnalysisInput( analysis_name, "cref"', captured['script'])
+        self.assertNotIn('SetDoubleAnalysisInput( analysis_name, "bref"', captured['script'])
         self.assertEqual(result.extra_data['selected_coefficient_family'], 'wake_far_field')
         self.assertEqual(result.extra_data['valid_aoa_range'], {'start': -10.0, 'end': 20.0})
         self.assertEqual(result.extra_data['solver_effective_conditions']['re_cref'], 70000.0)
         self.assertTrue(result.extra_data['solver_effective_conditions']['reynolds_applied'])
+        self.assertEqual(result.extra_data['solver_effective_conditions']['reference_source'], 'vspaero_case_file')
+        self.assertAlmostEqual(result.extra_data['Sref'], 0.064)
+        self.assertAlmostEqual(result.extra_data['Cref'], 0.081667)
+        self.assertAlmostEqual(result.extra_data['Bref'], 0.8)
+        self.assertEqual(result.extra_data['used_reference_source'], 'vspaero_case_file')
+        self.assertEqual(result.extra_data['used_oswald_source'], 'selected_family_ld_max')
+        self.assertGreater(result.extra_data['used_oswald'], 0.7)
         self.assertGreater(result.metrics.ld_max, 20.0)
         self.assertLess(result.metrics.cd_min, 0.02)
 
